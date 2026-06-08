@@ -218,14 +218,11 @@ module FoobarTemplates::CLI
 
     def scan_template_for_required_domains
       all_placeholders = DOMAIN_PLACEHOLDERS.values.flatten
-      pattern = Regexp.union(all_placeholders)
       found_placeholders = Set.new
 
-      Dir.glob("#{@template_src}/**/*", File::FNM_DOTMATCH).each do |f|
+      template_relative_paths.each do |rel|
+        f = File.join(@template_src, rel)
         next unless File.file?(f)
-        base_path = f[@template_src.length+1..-1]
-        next if base_path.nil?
-        next if base_path.start_with?(".git" + File::SEPARATOR) || base_path == ".git"
         next if binary_file?(f)
 
         content = File.read(f)
