@@ -128,6 +128,26 @@ describe FoobarTemplates do
     expect(src_dst_map['simple_dir']).to eq 'simple_dir'
   end
 
+  it "collect_non_ignored_paths walks files but prunes gitignored directories" do
+    template_dir = create_user_defined_template("testing", "template-user-supplied")
+    options = { bin: false, ext: false, coc:  false, template: "template-user-supplied" }
+    my_gem = FoobarTemplates::CLI::TemplateGenerator.new(options, "good-dog")
+
+    File.write("#{template_dir}/.gitignore", "node_modules/\n")
+    File.write("#{template_dir}/README.md", "Hello")
+    FileUtils.mkdir_p("#{template_dir}/src")
+    File.write("#{template_dir}/src/main.rb", "puts 1")
+    FileUtils.mkdir_p("#{template_dir}/node_modules/big_pkg")
+    File.write("#{template_dir}/node_modules/big_pkg/index.js", "ignored")
+    `git init #{template_dir}`
+
+    paths = my_gem.send('collect_non_ignored_paths', template_dir)
+
+    expect(paths).to include("README.md", "src", "src/main.rb")
+    expect(paths).not_to include("node_modules")
+    expect(paths.grep(/node_modules/)).to be_empty
+  end
+
   it "returns the expected interpolated string when substitute_template_values is called" do
     options = { bin: false, ext: false, coc:  false, template: "test_template" }
     gem_name = "good-dog"
@@ -170,6 +190,26 @@ describe FoobarTemplates do
     capture_stdout { FoobarTemplates.generate_template(options, gem_name) }
 
     expect(File).not_to exist "#{@dst_dir}/#{gem_name}/node_modules/dont_template.rb"
+    expect(File).not_to exist "#{@dst_dir}/#{gem_name}/node_modules"
+  end
+
+  it "handles templates with a large number of gitignored files without overflowing the arg list" do
+    template_dir = create_user_defined_template("testing", "template-user-supplied")
+    options = { bin: false, ext: false, coc:  false, template: "template-user-supplied" }
+    gem_name = "good-dog"
+
+    File.write("#{template_dir}/.gitignore", "node_modules/")
+    File.write("#{template_dir}/README.md", "Hello")
+    FileUtils.mkdir("#{template_dir}/node_modules")
+    # Enough files to blow past ARG_MAX if paths were passed as argv.
+    5000.times { |i| File.write("#{template_dir}/node_modules/file_#{i}.rb", "ignored #{i}") }
+    `git init #{template_dir}`
+
+    capture_stdout do 
+      FoobarTemplates.generate_template(options, gem_name)
+    end
+
+    expect(File).to exist "#{@dst_dir}/#{gem_name}/README.md"
     expect(File).not_to exist "#{@dst_dir}/#{gem_name}/node_modules"
   end
 

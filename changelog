@@ -1,5 +1,6 @@
 ** Unreleased **
   - Rename: project renamed from `bundlegem` to `foobar_templates`. Module is now `FoobarTemplates`, executable is `foobar_templates`, per-template config file is `foobar.yml`, and user config/templates live under `~/.foobar/`. No backward-compatibility shims.
+  - Bugfix: fixes `Arg list too long` crash when generating from templates containing many gitignored files (e.g. node_modules); ignored directories are now pruned during a breadth-first traversal and path checks are streamed to `git check-ignore` via NUL-delimited stdin instead of argv.
 
 ** Planned 0.2.x **
   - Feature: templates can declare a `name_validation:` block in bundlegem.yml with two optional keys: `reserved_names` (exact-match denylist) and `regex_validator` (a Ruby regex the project name must match). Validation runs after the built-in regex check and before any files are written. All checks happen in pure Ruby — no shell, no cross-platform concerns.

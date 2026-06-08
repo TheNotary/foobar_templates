@@ -1,7 +1,6 @@
 require 'pathname'
 require 'yaml'
 require 'open3'
-require 'shellwords'
 require 'set'
 
 $TRACE = false
@@ -271,39 +270,67 @@ module FoobarTemplates::CLI
 
     # Returns a hash of source directory names and their destination mappings
     def dynamically_generate_template_directories
-      template_dirs = Dir.glob("#{@template_src}/**/*", File::FNM_DOTMATCH).filter_map do |f|
-        base_path = f[@template_src.length+1..-1]
-        next if base_path.start_with?(".git" + File::SEPARATOR) || base_path == ".git"
-        next if f == "#{@template_src}/." || f == "#{@template_src}/.."
-        next unless File.directory?(f)
-        # next if ignored_by_git?(@template_src, base_path)
+      template_relative_paths.each_with_object({}) do |rel, dirs|
+        next unless File.directory?(File.join(@template_src, rel))
 
-        [base_path, substitute_template_values(base_path)]
-      end.to_h
-      filter_ignored_files!(@template_src, template_dirs)
-
-      template_dirs
+        dirs[rel] = substitute_template_values(rel)
+      end
     end
 
     # Figures out the translation between all template files and their
     # destination names
     def dynamically_generate_templates_files
-      template_files = Dir.glob("#{@template_src}/**/*", File::FNM_DOTMATCH).filter_map do |f|
-        base_path = f[@template_src.length+1..-1]
-        next if base_path.nil?
-        next if base_path.start_with?(".git" + File::SEPARATOR) || base_path == ".git"
-        next if base_path == "foobar.yml"
-        next unless File.file?(f)
+      template_files = template_relative_paths.each_with_object({}) do |rel, files|
+        next if rel == "foobar.yml"
+        next unless File.file?(File.join(@template_src, rel))
 
-        [base_path, substitute_template_values(base_path)]
-      end.to_h
+        files[rel] = substitute_template_values(rel)
+      end
 
       raise_no_files_in_template_error! if template_files.empty?
-      filter_ignored_files!(@template_src, template_files)
 
       return template_files
     end
 
+    # Enumerates every relative path under the template source, skipping the
+    # .git directory and any gitignored paths. Ignored directories are pruned
+    # during traversal so their (potentially huge) contents are never walked.
+    def template_relative_paths
+      @template_relative_paths ||= collect_non_ignored_paths(@template_src)
+    end
+
+    # Breadth-first walk that prunes ignored directories. One batched
+    # `git check-ignore` call is made per directory depth level, so we never
+    # descend into (or enumerate) an ignored subtree such as node_modules.
+    def collect_non_ignored_paths(root)
+      results = []
+      frontier = [nil] # relative dirs to scan at the current level; nil == root
+
+      until frontier.empty?
+        level_children = []
+        frontier.each do |rel_dir|
+          abs_dir = rel_dir ? File.join(root, rel_dir) : root
+          Dir.children(abs_dir).each do |name|
+            next if name == ".git"
+
+            level_children << (rel_dir ? File.join(rel_dir, name) : name)
+          end
+        end
+        break if level_children.empty?
+
+        ignored = ignored_paths(root, level_children)
+        next_frontier = []
+        level_children.each do |rel|
+          next if ignored.include?(rel)
+
+          results << rel
+          next_frontier << rel if File.directory?(File.join(root, rel))
+        end
+        frontier = next_frontier
+      end
+
+      results
+    end
 
     # Applies literal foo-bar variant substitutions to path strings
     def substitute_template_values(path_str)
@@ -351,12 +378,19 @@ module FoobarTemplates::CLI
       chunk.nil? || chunk.include?("\x00")
     end
 
-    def filter_ignored_files!(repo_root, path_hash)
-      cmd = "git -C #{repo_root} check-ignore #{Shellwords.join(path_hash.keys)}"
-      stdout, _, status = Open3.capture3(cmd)
-      filter_these_paths = stdout.split
+    # Returns the subset of the given relative paths that git considers ignored.
+    # Paths are streamed via NUL-delimited stdin rather than argv to avoid the
+    # OS ARG_MAX limit ("Arg list too long") and to handle paths containing
+    # spaces or newlines. Returns an empty set when root is not a git repo.
+    def ignored_paths(root, rel_paths)
+      return Set.new if rel_paths.empty?
 
-      path_hash.delete_if { |key, _| filter_these_paths.include?(key) }
+      stdin_data = rel_paths.join("\x00")
+      stdout, _, _status = Open3.capture3(
+        "git", "-C", root.to_s, "check-ignore", "-z", "--stdin",
+        stdin_data: stdin_data
+      )
+      stdout.split("\x00").to_set
     end
 
     def create_template_directories(template_directories, target)
