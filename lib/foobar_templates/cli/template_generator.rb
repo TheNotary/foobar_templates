@@ -23,53 +23,67 @@ module FoobarTemplates::CLI
     end
 
     def config
-      @config ||= build_interpolation_config
+      @config ||= time_it("build_interpolation_config") { build_interpolation_config }
     end
 
     def run
-      puts "Beginning run" if $TRACE
-      raise_project_with_that_name_already_exists! if File.exist?(target)
+      time_it("TOTAL run") do
+        puts "Beginning run" if $TRACE
+        raise_project_with_that_name_already_exists! if File.exist?(target)
 
-      puts "ensure_safe_project_name" if $TRACE
-      ensure_safe_project_name(name, config[:constant_array])
-
-      puts "run_name_validation" if $TRACE
-      run_name_validation
-
-      template_src = match_template_src
-
-      puts "dynamically_generate_template_directories" if $TRACE
-      time_it("dynamically_generate_template_directories") do
-        @template_directories = dynamically_generate_template_directories
-      end
-
-      puts "dynamically_generate_templates_files" if $TRACE
-      templates = dynamically_generate_templates_files
-
-      puts "Creating new project folder '#{name}'\n\n"
-      create_template_directories(@template_directories, target)
-
-      templates.each do |src, dst|
-        template("#{template_src}/#{src}", target.join(dst), config)
-      end
-
-      Dir.chdir(target) do
-        if @configurator.always_perform_git_init || !inside_git_work_tree?
-          `git init`
+        puts "ensure_safe_project_name" if $TRACE
+        time_it("ensure_safe_project_name") do
+          ensure_safe_project_name(name, config[:constant_array])
         end
-        `git add .`
-      end
 
-      if @tconf[:bootstrap_command]
-        puts "Executing bootstrap_command"
-        cmd = safe_gsub_template_variables(@tconf[:bootstrap_command])
-        puts cmd
-        Dir.chdir(target) do
-          `#{cmd}`
+        puts "run_name_validation" if $TRACE
+        time_it("run_name_validation") { run_name_validation }
+
+        template_src = time_it("match_template_src") { match_template_src }
+
+        puts "dynamically_generate_template_directories" if $TRACE
+        @template_directories = time_it("dynamically_generate_template_directories") do
+          dynamically_generate_template_directories
         end
-      end
 
-      puts "\nComplete."
+        puts "dynamically_generate_templates_files" if $TRACE
+        templates = time_it("dynamically_generate_templates_files") do
+          dynamically_generate_templates_files
+        end
+
+        puts "Creating new project folder '#{name}'\n\n"
+        time_it("create_template_directories") do
+          create_template_directories(@template_directories, target)
+        end
+
+        time_it("write_template_files") do
+          templates.each do |src, dst|
+            template("#{template_src}/#{src}", target.join(dst), config)
+          end
+        end
+
+        time_it("git_init_and_add") do
+          Dir.chdir(target) do
+            if @configurator.always_perform_git_init || !inside_git_work_tree?
+              `git init`
+            end
+            `git add .`
+          end
+        end
+
+        if @tconf[:bootstrap_command]
+          puts "Executing bootstrap_command"
+          cmd = safe_gsub_template_variables(@tconf[:bootstrap_command])
+          puts cmd
+          time_it("bootstrap_command") do
+            Dir.chdir(target) do
+              `#{cmd}`
+            end
+          end
+        end
+
+        puts "\nComplete."
+      end
     end
 
     def build_interpolation_config
@@ -84,7 +98,9 @@ module FoobarTemplates::CLI
       git_user_email = `git config user.email`.chomp
 
       # Resolve domain values from ~/.foobar/config, prompting if needed
-      required_domains = scan_template_for_required_domains
+      required_domains = time_it("scan_template_for_required_domains") do
+        scan_template_for_required_domains
+      end
       prompt_for_missing_domains(required_domains)
 
       registry_domain = @configurator.domain('registry_domain')
@@ -296,7 +312,9 @@ module FoobarTemplates::CLI
     # .git directory and any gitignored paths. Ignored directories are pruned
     # during traversal so their (potentially huge) contents are never walked.
     def template_relative_paths
-      @template_relative_paths ||= collect_non_ignored_paths(@template_src)
+      @template_relative_paths ||= time_it("collect_non_ignored_paths") do
+        collect_non_ignored_paths(@template_src)
+      end
     end
 
     # Breadth-first walk that prunes ignored directories. One batched
@@ -476,11 +494,18 @@ Exiting...
     end
 
     def time_it(label = nil)
+      return yield unless performance?
+
       start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      yield
+      result = yield
       end_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       elapsed_ms = ((end_time - start_time) * 1000).round(2)
       puts "#{label || 'Elapsed'}: #{elapsed_ms} ms"
+      result
+    end
+
+    def performance?
+      @options[:performance]
     end
 
     # This checks to see that the gem_name is a valid ruby gem name and will 'work'

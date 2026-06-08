@@ -29,6 +29,10 @@ parser = OptionParser.new do |opts|
     exit
   end
 
+  opts.on("-p", "--performance", "Show performance metrics for template generation") do
+    options[:performance] = true
+  end
+
   opts.on("--install-public-templates", "Install public templates") do
     FoobarTemplates.install_public_templates
     exit
