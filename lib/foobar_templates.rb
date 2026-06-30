@@ -80,9 +80,7 @@ module FoobarTemplates
     end
 
     def generate_template(options, gem_name)
-      require 'foobar_templates/cli/template_generator'
-
-      template_generator = CLI::TemplateGenerator.new(options, gem_name).run
+      CLI::TemplateGenerator.new(options, gem_name).run
     rescue FoobarTemplates::CLIError => e
       msg = e.message
       $stderr.puts msg if msg && !msg.empty? && msg != e.class.name
