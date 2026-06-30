@@ -178,8 +178,9 @@ module FoobarTemplates::CLI
 
       reserved = Array(rules[:reserved_names]).map(&:to_s)
       if reserved.include?(name)
-        $stderr.puts "Invalid project name '#{name}': reserved by template '#{@options[:template]}'. Please choose another name."
-        raise
+        raise FoobarTemplates::CLIError, <<~HEREDOC
+          Invalid project name '#{name}': reserved by template '#{@options[:template]}'. Please choose another name.
+        HEREDOC
       end
 
       pattern = rules[:regex_validator]
@@ -187,13 +188,15 @@ module FoobarTemplates::CLI
         begin
           regex = Regexp.new(pattern.to_s)
         rescue RegexpError => e
-          $stderr.puts "Template '#{@options[:template]}' has an invalid name_validation.regex_validator: #{e.message}"
-          raise "invalid name_validation.regex_validator"
+          raise FoobarTemplates::CLIError, <<~HEREDOC
+            Template '#{@options[:template]}' has an invalid name_validation.regex_validator: #{e.message}
+          HEREDOC
         end
 
         unless regex.match?(name)
-          $stderr.puts "Invalid project name '#{name}': does not match #{regex.inspect} required by template '#{@options[:template]}'."
-          raise
+          raise FoobarTemplates::CLIError, <<~HEREDOC
+            Invalid project name '#{name}': does not match #{regex.inspect} required by template '#{@options[:template]}'.
+          HEREDOC
         end
       end
     end
@@ -463,31 +466,28 @@ module FoobarTemplates::CLI
     end
 
     def raise_no_files_in_template_error!
-      err_no_files_in_template = <<-HEREDOC
-Ooops, the template was found for '#{@options[:template]}' in ~/.foobar/templates,
-but no files were found within it.
+      raise FoobarTemplates::CLIError, <<~HEREDOC
+        The template was found for '#{@options[:template]}' in ~/.foobar/templates,
+        but no files were found within it.
 
-Exiting...
+        Exiting...
       HEREDOC
-      puts err_no_files_in_template
-      raise
     end
 
     def raise_project_with_that_name_already_exists!
-      err_project_with_that_name_exists = <<-HEREDOC
-Ooops, a project with the name #{target} already exists.
-Can't make project.  Either delete that folder or choose a new project name
+      raise FoobarTemplates::CLIError, <<~HEREDOC
+        A project with the name #{target} already exists.
+        Can't make project.  Either delete that folder or choose a new project name
 
-Exiting...
+        Exiting...
       HEREDOC
-      puts err_project_with_that_name_exists
-      raise
     end
 
     def raise_template_not_found!
-      err_missing_template = "Could not find template folder '#{@options[:template]}' in `~/.foobar/templates/`. Please check to make sure your desired template exists."
-      $stderr.puts err_missing_template
-      raise
+      raise FoobarTemplates::CLIError, <<~HEREDOC
+        Template not found for '#{@options[:template]}' in `~/.foobar/templates/`. 
+        Please check to make sure your desired template exists.
+      HEREDOC
     end
 
     def time_it(label = nil)
@@ -509,8 +509,9 @@ Exiting...
     # and won't overlap with a foobar_templates constant apparently...
     def ensure_safe_project_name(name, constant_array)
       if name =~ /^\d/
-        $stderr.puts "Invalid gem name #{name} Please give a name which does not start with numbers."
-        raise
+        raise FoobarTemplates::CLIError, <<~HEREDOC
+          Invalid gem name #{name}. Please give a name which does not start with numbers.
+        HEREDOC
       end
     end
 

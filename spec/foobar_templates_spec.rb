@@ -285,9 +285,7 @@ describe FoobarTemplates do
       File.write("#{template_dir}/README.md", "# Readme")
       `git init #{template_dir}`
 
-      expect {
-        capture_stdout { capture_stderr { FoobarTemplates.generate_template(options, gem_name) } }
-      }.to raise_error(RuntimeError)
+      capture_stdout { capture_stderr { FoobarTemplates.generate_template(options, gem_name) } }
 
       expect($captured_stderr).to include "reserved by template"
       expect(File).not_to exist("#{@dst_dir}/#{gem_name}")
@@ -322,9 +320,7 @@ describe FoobarTemplates do
       File.write("#{template_dir}/README.md", "# Readme")
       `git init #{template_dir}`
 
-      expect {
-        capture_stdout { capture_stderr { FoobarTemplates.generate_template(options, gem_name) } }
-      }.to raise_error(RuntimeError)
+      capture_stdout { capture_stderr { FoobarTemplates.generate_template(options, gem_name) } }
 
       expect($captured_stderr).to include "does not match"
       expect(File).not_to exist("#{@dst_dir}/#{gem_name}")
@@ -359,9 +355,7 @@ describe FoobarTemplates do
       File.write("#{template_dir}/README.md", "# Readme")
       `git init #{template_dir}`
 
-      expect {
-        capture_stdout { capture_stderr { FoobarTemplates.generate_template(options, gem_name) } }
-      }.to raise_error(RuntimeError)
+      capture_stdout { capture_stderr { FoobarTemplates.generate_template(options, gem_name) } }
 
       expect($captured_stderr).to include "reserved"
     end
@@ -378,9 +372,7 @@ describe FoobarTemplates do
       File.write("#{template_dir}/README.md", "# Readme")
       `git init #{template_dir}`
 
-      expect {
-        capture_stdout { capture_stderr { FoobarTemplates.generate_template(options, gem_name) } }
-      }.to raise_error(RuntimeError)
+      capture_stdout { capture_stderr { FoobarTemplates.generate_template(options, gem_name) } }
 
       expect($captured_stderr).to include "invalid name_validation.regex_validator"
     end
