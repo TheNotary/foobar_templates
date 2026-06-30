@@ -153,3 +153,20 @@ If you would find additional variables handy, set me up with a PR and assuming i
 - Use `FOO_` prefixed placeholders for non-name variables: `FOO_AUTHOR`, `FOO_EMAIL`, `FOO_GIT_REPO_URL`, etc.
 - Running `foobar_templates --cheat-sheet` will list off available template variables
 - File **names** containing `foo-bar` or `foo_bar` will have those replaced by the project name
+
+
+## Release Process
+
+Cut a pre-release with:
+
+```
+rake release
+```
+
+Days or months later, promote it to a release:
+
+```
+git checkout OLD_RELEASE
+rake promote
+```
+

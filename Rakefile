@@ -19,10 +19,24 @@ module ReleaseHelper
   end
 
   def current_version
+    return ENV['GEM_VERSION'] if ENV['GEM_VERSION']
+
     src = File.read(VERSION_FILE)
-    m = src.match(/VERSION\s*=\s*"([^"]+)"/)
+    m = src.match(/VERSION\s*=\s*["']([^"']+)["']/)
     abort "Could not parse VERSION from #{VERSION_FILE}" unless m
     m[1]
+  end
+
+  def strip_rc(version)
+    m = version.match(RC_RE)
+    return nil unless m
+    maj, min, pat, _rc = m.captures
+    "#{maj}.#{min}.#{pat}"
+  end
+
+  def rc_tag_on_head
+    tags = `git tag --points-at HEAD`.strip.split("\n")
+    tags.find { |t| t.match?(/\Av\d+\.\d+\.\d+\.rc\d+\z/) }
   end
 
   def next_version(v)
@@ -164,6 +178,49 @@ task :release do
   puts "=" * 60
   puts "Released: #{tag}"
   puts "Next development version: #{next_v}"
+  puts "Tag: https://github.com/TheNotary/#{GEM_NAME}/releases/tag/#{tag}"
+  puts "=" * 60
+end
+
+desc "Promote a pre-release commit to a final release (no new commit needed)"
+task :promote, [:version] do |_t, args|
+  include_helper = ReleaseHelper
+
+  include_helper.preflight!
+
+  # Determine the RC tag on HEAD
+  rc_tag = include_helper.rc_tag_on_head
+  abort "No pre-release tag (vX.Y.Z.rcN) found on HEAD. Checkout a tagged RC commit first." unless rc_tag
+  rc_version = rc_tag.sub(/\Av/, '')
+
+  # Determine target release version
+  release_version = args[:version] || include_helper.strip_rc(rc_version)
+  abort "Could not derive release version from #{rc_version}" unless release_version
+  abort "Target version #{release_version} is not a release format (expected MAJOR.MINOR.PATCH)" unless release_version.match?(ReleaseHelper::REL_RE)
+
+  sha = `git rev-parse --short HEAD`.strip
+  puts "Promoting commit #{sha} (tagged #{rc_tag}) \u2192 v#{release_version}"
+  unless include_helper.confirm!("Continue?", default: false)
+    puts "Aborted."
+    exit 0
+  end
+
+  # Build gem with the release version (override via ENV, no file edit)
+  ENV['GEM_VERSION'] = release_version
+  Rake::Task[:build].invoke
+
+  gem_file = "pkg/#{GEM_NAME}-#{release_version}.gem"
+  abort "Built gem not found at #{gem_file}" unless File.exist?(gem_file)
+
+  # Tag and push
+  tag = "v#{release_version}"
+  include_helper.sh! %(git tag -a #{tag} -m "Release #{tag}")
+  include_helper.push! "git push origin #{tag}"
+  include_helper.push! "gem push #{gem_file}"
+
+  puts ""
+  puts "=" * 60
+  puts "Promoted: #{rc_tag} \u2192 #{tag}"
   puts "Tag: https://github.com/TheNotary/#{GEM_NAME}/releases/tag/#{tag}"
   puts "=" * 60
 end
