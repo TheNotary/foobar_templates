@@ -242,6 +242,36 @@ describe FoobarTemplates do
     expect(output).to include "echo #{gem_name}"
   end
 
+  it "prints stdout of a multi-line bootstrap_command" do
+    # this is quite pointless, we're literally allowing the user to execute a command on their shell...
+    template_dir = create_user_defined_template("testing", "template-user-supplied")
+    options = { bin: false, ext: false, coc:  false, template: "template-user-supplied" }
+    gem_name = "good-dog"
+
+    yaml_content = <<~YAML
+      bootstrap_command: |
+        echo 'foo-bar'
+        pwd
+        cd ..
+        pwd
+    YAML
+
+    File.write("#{template_dir}/foobar.yml", yaml_content)
+    File.write("#{template_dir}/README.md", "# Readme...")
+    `git init #{template_dir}`
+
+    output = capture_stdout { FoobarTemplates.generate_template(options, gem_name) }
+
+    expect(output).to end_with <<~OUTPUT
+      pwd
+      good-dog
+      /tmp/foobar_templates_dst_dir/good-dog
+      /tmp/foobar_templates_dst_dir
+
+      Complete.
+    OUTPUT
+  end
+
   describe "name_validation" do
     it "rejects names listed in reserved_names and skips bootstrap_command" do
       template_dir = create_user_defined_template("testing", "template-user-supplied")

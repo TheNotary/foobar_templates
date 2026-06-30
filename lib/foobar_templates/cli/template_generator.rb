@@ -77,7 +77,7 @@ module FoobarTemplates::CLI
           puts cmd
           time_it("bootstrap_command") do
             Dir.chdir(target) do
-              `#{cmd}`
+              puts `#{cmd}`
             end
           end
         end
