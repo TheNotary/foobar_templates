@@ -9,6 +9,7 @@ describe FoobarTemplates do
 
     reset_test_env
     FileUtils.chdir(@dst_dir)
+    @dst_dir = FileUtils.pwd  # We need to resolve the /tmp dir incase it's a mac with /private/tmp
   end
 
   it 'has a version number' do
@@ -205,7 +206,7 @@ describe FoobarTemplates do
     5000.times { |i| File.write("#{template_dir}/node_modules/file_#{i}.rb", "ignored #{i}") }
     `git init #{template_dir}`
 
-    capture_stdout do 
+    capture_stdout do
       FoobarTemplates.generate_template(options, gem_name)
     end
 
@@ -265,8 +266,8 @@ describe FoobarTemplates do
     expect(output).to end_with <<~OUTPUT
       pwd
       good-dog
-      /tmp/foobar_templates_dst_dir/good-dog
-      /tmp/foobar_templates_dst_dir
+      #{@dst_dir}/good-dog
+      #{@dst_dir}
 
       Complete.
     OUTPUT
