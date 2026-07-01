@@ -1,4 +1,4 @@
-VERSION = "2.0.1.rc5"
+VERSION = "2.0.1.rc6"
 
 module FoobarTemplates
   VERSION = ENV.fetch("GEM_VERSION", VERSION)
