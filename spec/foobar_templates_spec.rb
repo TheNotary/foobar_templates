@@ -565,7 +565,7 @@ describe FoobarTemplates do
 
   describe "create personal templates" do
     let(:github_name) { "Test" } # set by reset_test_env via `git config --global user.name "Test"`
-    let(:local_dir)   { "#{ENV['HOME']}/.foobar/templates/templates-#{github_name}" }
+    let(:local_dir)   { "#{ENV['HOME']}/.foobar/templates/templates-#{github_name.downcase}" }
 
     before :each do
       # Default: no remote — skip network calls.

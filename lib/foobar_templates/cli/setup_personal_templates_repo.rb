@@ -13,7 +13,7 @@ module FoobarTemplates::CLI
           return
         end
 
-        github_name = personal_templates_github_name(input: input, output: output)
+        github_name = personal_templates_github_name(input: input, output: output).downcase
         return if github_name.nil? || github_name.empty?
 
         local_dir = "#{ENV['HOME']}/.foobar/templates/templates-#{github_name}"
