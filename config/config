@@ -1,8 +1,8 @@
 # Comments made to this file will not be preserved
 ---
 default_template: cli_gem
-public_templates: https://github.com/TheNotary/template-builtins
-registry_domain: null
-repo_domain: null     # github.com
+public_templates: https://github.com/TheNotary/templates-builtin
+registry_domain: ghcr.io
+repo_domain: github.com     # github.com
 k8s_domain: null      # k8s.example.com
 always_perform_git_init: false
