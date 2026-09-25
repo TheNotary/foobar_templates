@@ -2,6 +2,10 @@ require 'pathname'
 require 'yaml'
 require 'open3'
 require 'set'
+require 'fileutils'
+require_relative '../core/template_source'
+require_relative '../core/interpolation_context'
+require_relative '../core/template_renderer'
 
 $TRACE = false
 
@@ -87,81 +91,31 @@ module FoobarTemplates::CLI
     end
 
     def build_interpolation_config
-      title = name.tr('-', '_').split('_').map(&:capitalize).join(" ")
-      pascal_name = name.tr('-', '_').split('_').map(&:capitalize).join
-      unprefixed_name = name.sub(/^#{@tconf[:prefix]}/, '')
-      underscored_name = name.tr('-', '_')
-      constant_name = name.split('_').map{|p| p[0..0].upcase + p[1..-1] unless p.empty?}.join
-      constant_name = constant_name.split('-').map{|q| q[0..0].upcase + q[1..-1] }.join('::') if constant_name =~ /-/
-      constant_array = constant_name.split('::')
-      git_user_name = `git config user.name`.chomp
-      git_user_email = `git config user.email`.chomp
-
-      # Resolve domain values from ~/.foobar/config, prompting if needed
-      required_domains = time_it("scan_template_for_required_domains") do
-        scan_template_for_required_domains
-      end
-      prompt_for_missing_domains(required_domains)
-
-      registry_domain = @configurator.domain('registry_domain')
-      k8s_domain = @configurator.domain('k8s_domain')
-      git_repo_domain = @configurator.domain('repo_domain') || 'github.com'
-
-      if git_user_name.empty?
-        raise FoobarTemplates::CLIError, [
-          "Error: git config user.name didn't return a value.  You'll probably want to make sure that's configured with your github username:",
-          "",
-          "git config --global user.name YOUR_GH_NAME",
-        ].join("\n")
-      else
-        # git_repo_path = provider.com/user/name
-        git_repo_path = "#{git_repo_domain}/#{git_user_name}/#{name}".downcase # downcasing for languages like go that are creative
-      end
-
-      # git_repo_url = https://provider.com/user/name
-      git_repo_url = "https://#{git_repo_domain}/#{git_user_name}/#{name}"
-
-      image_path = "#{git_user_name}/#{name}".downcase
-      registry_repo_path = "#{registry_domain}/#{image_path}".downcase
-
-      config = {
-        :name             => name,
-        :title            => title,
-        :unprefixed_name  => unprefixed_name,
-        unprefixed_pascal: unprefixed_name.tr('-', '_').split('_').map(&:capitalize).join,
-        underscored_name:  underscored_name,
-        :pascal_name      => pascal_name,
-        :camel_name       => pascal_name.sub(/^./, &:downcase),
-        :screamcase_name  => name.tr('-', '_').upcase,
-        :namespaced_path  => name.tr('-', '/'),
-        :makefile_path    => "#{underscored_name}/#{underscored_name}",
-        :constant_name    => constant_name,
-        :constant_array   => constant_array,
-        :author           => git_user_name.empty? ? "TODO: Write your name" : git_user_name,
-        :email            => git_user_email.empty? ? "TODO: Write your email address" : git_user_email,
-        :git_repo_domain  => git_repo_domain,
-        :git_repo_url     => git_repo_url,
-        :git_repo_path    => git_repo_path,
-        :image_path       => image_path,
-        :registry_domain  => registry_domain,
-        :registry_repo_path => registry_repo_path,
-        :k8s_domain       => k8s_domain,
-        :template         => @options[:template],
-        :test             => @options[:test],
-      }
+      interpolation_context.config
     end
 
 
     private
+
+    def interpolation_context
+      @interpolation_context ||= FoobarTemplates::Core::InterpolationContext.new(
+        name: name, template_root: @template_src, template_name: @options[:template],
+        # Legacy generation also scans metadata for domain placeholders.
+        source_files: template_relative_paths, configurator: @configurator,
+        interactive: true, legacy: true, test: @options[:test]
+      )
+    end
+
+    def renderer
+      @renderer ||= FoobarTemplates::Core::TemplateRenderer.new(config)
+    end
 
     def inside_git_work_tree?
       system("git rev-parse --is-inside-work-tree", out: File::NULL, err: File::NULL)
     end
 
     def safe_gsub_template_variables(user_string)
-      build_content_replacement_pairs.inject(user_string) do |result, (find, replace)|
-        result.gsub(find, replace)
-      end
+      renderer.render_string(user_string)
     end
 
     # Runs declarative name validation rules from the template's foobar.yml:
@@ -173,115 +127,27 @@ module FoobarTemplates::CLI
     # Both keys are optional. All checks run in pure Ruby — no shell, no
     # cross-platform concerns.
     def run_name_validation
-      rules = @tconf[:name_validation]
-      return if rules.nil? || rules.empty?
-
-      reserved = Array(rules[:reserved_names]).map(&:to_s)
-      if reserved.include?(name)
-        raise FoobarTemplates::CLIError, <<~HEREDOC
-          Invalid project name '#{name}': reserved by template '#{@options[:template]}'. Please choose another name.
-        HEREDOC
-      end
-
-      pattern = rules[:regex_validator]
-      if pattern && !pattern.to_s.empty?
-        begin
-          regex = Regexp.new(pattern.to_s)
-        rescue RegexpError => e
-          raise FoobarTemplates::CLIError, <<~HEREDOC
-            Template '#{@options[:template]}' has an invalid name_validation.regex_validator: #{e.message}
-          HEREDOC
-        end
-
-        unless regex.match?(name)
-          raise FoobarTemplates::CLIError, <<~HEREDOC
-            Invalid project name '#{name}': does not match #{regex.inspect} required by template '#{@options[:template]}'.
-          HEREDOC
-        end
-      end
+      interpolation_context.run_name_validation
     end
 
     # Domain placeholder → config key mapping
-    DOMAIN_PLACEHOLDERS = {
-      'registry_domain' => %w[FOO_REGISTRY_DOMAIN FOO_REGISTRY_REPO_PATH],
-      'k8s_domain'      => %w[FOO_K8S_DOMAIN],
-      'repo_domain'     => %w[FOO_GIT_REPO_DOMAIN FOO_GIT_REPO_PATH FOO_GIT_REPO_URL],
-    }.freeze
+    DOMAIN_PLACEHOLDERS = FoobarTemplates::Core::InterpolationContext::DOMAIN_PLACEHOLDERS
 
     # Human-readable names for prompting
-    DOMAIN_DISPLAY_NAMES = {
-      'registry_domain' => 'registry-domain',
-      'k8s_domain'      => 'k8s-domain',
-      'repo_domain'     => 'repo-domain',
-    }.freeze
+    DOMAIN_DISPLAY_NAMES = FoobarTemplates::Core::InterpolationContext::DOMAIN_DISPLAY_NAMES
 
-    DOMAIN_DEFAULTS = {
-      'repo_domain' => 'github.com',
-    }.freeze
+    DOMAIN_DEFAULTS = FoobarTemplates::Core::InterpolationContext::DOMAIN_DEFAULTS
 
     def scan_template_for_required_domains
-      all_placeholders = DOMAIN_PLACEHOLDERS.values.flatten
-      found_placeholders = Set.new
-
-      template_relative_paths.each do |rel|
-        f = File.join(@template_src, rel)
-        next unless File.file?(f)
-        next if binary_file?(f)
-
-        content = File.read(f)
-        all_placeholders.each do |ph|
-          found_placeholders << ph if content.include?(ph)
-        end
-      end
-
-      # Map found placeholders back to domain config keys
-      required = Set.new
-      DOMAIN_PLACEHOLDERS.each do |domain_key, placeholders|
-        required << domain_key if placeholders.any? { |ph| found_placeholders.include?(ph) }
-      end
-      required.to_a
+      interpolation_context.scan_template_for_required_domains
     end
 
     def prompt_for_missing_domains(required_domains)
-      required_domains.each do |domain_key|
-        next if @configurator.domain(domain_key) && !@configurator.domain(domain_key).empty?
-
-        display_name = DOMAIN_DISPLAY_NAMES[domain_key]
-        default = DOMAIN_DEFAULTS[domain_key]
-        default_hint = default ? " (default: #{default})" : ""
-
-        puts "This template requires '#{display_name}'. The value will be saved to ~/.foobar/config for future use."
-        print "Enter #{display_name}#{default_hint}: "
-        value = $stdin.gets&.chomp || ''
-
-        value = default if value.empty? && default
-
-        if value.empty?
-          puts "Warning: No value provided for '#{display_name}'. Template placeholders may not be fully resolved."
-        end
-
-        @configurator.set_domain(domain_key, value)
-      end
+      interpolation_context.prompt_for_missing_domains(required_domains)
     end
 
     def load_template_configs
-      template_config_path = File.join(@template_src, "foobar.yml")
-
-      if File.exist?(template_config_path)
-        t_config = YAML.load_file(template_config_path, symbolize_names: true)
-      else
-        t_config = {
-          purpose: "tool",
-          language: "go"
-        }
-      end
-
-      if t_config[:prefix].nil?
-        t_config[:prefix] = t_config[:purpose] ? "#{t_config[:purpose]}-" : ""
-        t_config[:prefix] += t_config[:language] ? "#{t_config[:language]}-" : ""
-      end
-
-      t_config
+      FoobarTemplates::Core::InterpolationContext.load_template_configs(@template_src)
     end
 
     # Returns a hash of source directory names and their destination mappings
@@ -321,79 +187,24 @@ module FoobarTemplates::CLI
     # `git check-ignore` call is made per directory depth level, so we never
     # descend into (or enumerate) an ignored subtree such as node_modules.
     def collect_non_ignored_paths(root)
-      results = []
-      frontier = [nil] # relative dirs to scan at the current level; nil == root
-
-      until frontier.empty?
-        level_children = []
-        frontier.each do |rel_dir|
-          abs_dir = rel_dir ? File.join(root, rel_dir) : root
-          Dir.children(abs_dir).each do |name|
-            next if name == ".git"
-
-            level_children << (rel_dir ? File.join(rel_dir, name) : name)
-          end
-        end
-        break if level_children.empty?
-
-        ignored = ignored_paths(root, level_children)
-        next_frontier = []
-        level_children.each do |rel|
-          next if ignored.include?(rel)
-
-          results << rel
-          next_frontier << rel if File.directory?(File.join(root, rel))
-        end
-        frontier = next_frontier
-      end
-
-      results
+      FoobarTemplates::Core::TemplateSource.new(root).relative_paths
     end
 
     # Applies literal foo-bar variant substitutions to path strings
     def substitute_template_values(path_str)
-      build_filename_replacement_pairs.inject(path_str) do |result, (find, replace)|
-        result.gsub(find, replace)
-      end
+      renderer.render_path(path_str)
     end
 
     def build_filename_replacement_pairs
-      [
-        ['FOO_BAR',   config[:screamcase_name]],
-        ['FooBar',    config[:pascal_name]],
-        ['fooBar',    config[:camel_name]],
-        ['foo-bar',   config[:name]],
-        ['foo_bar',   config[:underscored_name]],
-      ]
+      renderer.filename_replacement_pairs
     end
 
     def build_content_replacement_pairs
-      [
-        # FOO_ prefixed non-name variables
-        ['FOO_REGISTRY_REPO_PATH', config[:registry_repo_path] || ''],
-        ['FOO_GIT_REPO_DOMAIN',    config[:git_repo_domain]],
-        ['FOO_GIT_REPO_PATH',      config[:git_repo_path]],
-        ['FOO_GIT_REPO_URL',       config[:git_repo_url]],
-        ['FOO_REGISTRY_DOMAIN',    config[:registry_domain] || ''],
-        ['FOO_IMAGE_PATH',         config[:image_path]],
-        ['FOO_K8S_DOMAIN',         config[:k8s_domain] || ''],
-        ['FOO_AUTHOR',             config[:author]],
-        ['FOO_EMAIL',              config[:email]],
-        # Name-derived: compound/longer patterns first
-        ['Foo::Bar',               config[:constant_name]],
-        ['FOO_BAR',                config[:screamcase_name]],
-        ['FooBar',                 config[:pascal_name]],
-        ['fooBar',                 config[:camel_name]],
-        ['Foo Bar',                config[:title]],
-        ['foo/bar',                config[:namespaced_path]],
-        ['foo-bar',                config[:name]],
-        ['foo_bar',                config[:underscored_name]],
-      ]
+      renderer.content_replacement_pairs
     end
 
     def binary_file?(path)
-      chunk = File.binread(path, 8192)
-      chunk.nil? || chunk.include?("\x00")
+      FoobarTemplates::Core::TemplateRenderer.binary_content?(File.binread(path))
     end
 
     # Returns the subset of the given relative paths that git considers ignored.
@@ -401,14 +212,7 @@ module FoobarTemplates::CLI
     # OS ARG_MAX limit ("Arg list too long") and to handle paths containing
     # spaces or newlines. Returns an empty set when root is not a git repo.
     def ignored_paths(root, rel_paths)
-      return Set.new if rel_paths.empty?
-
-      stdin_data = rel_paths.join("\x00")
-      stdout, _, _status = Open3.capture3(
-        "git", "-C", root.to_s, "check-ignore", "-z", "--stdin",
-        stdin_data: stdin_data
-      )
-      stdout.split("\x00").to_set
+      FoobarTemplates::Core::TemplateSource.new(root).ignored_paths(rel_paths)
     end
 
     def create_template_directories(template_directories, target)
@@ -446,13 +250,7 @@ module FoobarTemplates::CLI
         FileUtils.mkdir_p(File.dirname(destination))
         FileUtils.cp(source, destination)
       else
-        content = File.read(source)
-        content = content.gsub(/>>>\s+(\S+)/) { $1.chars.join("\x00") }
-        build_content_replacement_pairs.each do |find, replace|
-          content = content.gsub(find, replace)
-        end
-        content = content.gsub("\x00", '')
-        make_file(destination, {}) { content }
+        make_file(destination, {}) { renderer.render_file(source) }
       end
 
       original_mode = File.stat(source).mode
@@ -508,11 +306,7 @@ module FoobarTemplates::CLI
     # This checks to see that the gem_name is a valid ruby gem name and will 'work'
     # and won't overlap with a foobar_templates constant apparently...
     def ensure_safe_project_name(name, constant_array)
-      if name =~ /^\d/
-        raise FoobarTemplates::CLIError, <<~HEREDOC
-          Invalid gem name #{name}. Please give a name which does not start with numbers.
-        HEREDOC
-      end
+      interpolation_context.ensure_safe_project_name(name, constant_array)
     end
 
   end

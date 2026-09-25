@@ -46,6 +46,18 @@ $  foobar_templates -t arduino project_name
 
 You'll find a project skeleton in ~/.foobar/templates/my_service that you can customize to your liking.
 
+### Merge Mode
+
+You can merge template assets into an existing project with the `merge` subcommand.  
+
+| Command | Action |
+| ---     | ---    |
+| `foobar_templates merge`                     | supply no options to cruise through the TUI mode |
+| `foobar_templates merge -t api`              | Merge all files from a named template without the picker |
+| `foobar_templates merge -t api -a`           | Explicit all-files scope; **not** force overwrite |
+| `foobar_templates merge -t api -s file/path` | Merge exactly one source file, selected before name substitution |
+| `foobar_templates merge --help`              | Show merge options without initializing configuration |
+
 ### Configuration
 
 Configuration is stored in `~/.foobar/config` (created automatically on first run). At minimum, you need your git user name and email configured:

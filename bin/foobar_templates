@@ -3,6 +3,10 @@
 require 'optparse'
 require 'foobar_templates'
 
+if ARGV.first == 'merge'
+  ARGV.shift
+  exit FoobarTemplates.merge(ARGV)
+end
 
 Signal.trap("INT") { exit 1 }
 options = {}

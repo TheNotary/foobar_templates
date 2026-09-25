@@ -21,10 +21,14 @@ Gem::Specification.new do |s|
   s.metadata["documentation_uri"] = "https://github.com/TheNotary/foobar_templates"
   s.metadata["source_code_uri"] = "https://github.com/TheNotary/foobar_templates/tree/v#{version}"
 
-  s.files         = `git ls-files -z`.split("\x0")
+  # Include new implementation files in local builds before they are staged.
+  s.files         = (`git ls-files -z`.split("\x0") + Dir.glob("lib/**/*.rb")).uniq
   s.executables   = s.files.grep(%r{^bin/}) { |f| File.basename(f) }
   s.test_files    = s.files.grep(%r{^(test|spec|features)/})
   s.require_paths = ["lib"]
+
+  s.add_dependency "diff-lcs", "~> 1.6"
+  s.add_dependency "unicode-display_width", "~> 2.6"
 
   s.add_development_dependency "rake", "~> 13.2"
   s.add_development_dependency "rdoc", "~> 7.0"

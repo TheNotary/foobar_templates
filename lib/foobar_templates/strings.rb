@@ -14,6 +14,11 @@ Usage Examples:
   # Create a ruby gem project using the built in service template
   $ foobar_templates --template ruby-cli-gem your_project_name
 
+  # Merge templates into the current project (picker; no default template)
+  $ foobar_templates merge
+  $ foobar_templates merge -t ruby-cli-gem -s Gemfile
+  $ foobar_templates merge --help
+
   # Convert the current directory which represents a working project into a
   # template by replacing project name variants with foo-bar placeholders
   $ cd my_recently_built_project

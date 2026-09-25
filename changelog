@@ -1,4 +1,5 @@
 ** Unreleased **
+  - Feature: `foobar_templates merge` applies rendered templates to the current directory, with a multi-template picker, single-file/all-files scope, safe y/n/diff overwrite decisions, and non-TTY conflict preflight. No Git initialization, bootstrap commands, or transaction rollback.
   - Rename: project renamed from `bundlegem` to `foobar_templates`. Module is now `FoobarTemplates`, executable is `foobar_templates`, per-template config file is `foobar.yml`, and user config/templates live under `~/.foobar/`. No backward-compatibility shims.
   - Bugfix: fixes `Arg list too long` crash when generating from templates containing many gitignored files (e.g. node_modules); ignored directories are now pruned during a breadth-first traversal and path checks are streamed to `git check-ignore` via NUL-delimited stdin instead of argv.
 

@@ -14,6 +14,32 @@ module FoobarTemplates
       def custom_template_location() = File.expand_path("~/.foobar/templates")
       def default_template_name() = "ruby-cli-gem"
 
+      # The picker uses source paths, not names, so duplicate names remain selectable.
+      # Keep this separate from explicit-name resolution and its historical precedence.
+      def available_templates
+        entries = []
+        visited = {}
+        { "builtin" => internal_template_location, "custom" => custom_template_location }.each do |origin, location|
+          root = File.expand_path(location)
+          next unless catalog_directory?(root)
+
+          catalog_children(root).each do |child|
+            catalog_leaves(child, visited).each do |path|
+              name = File.basename(path).sub(/^template-/, "")
+              source = "#{origin}/#{path.delete_prefix("#{root}/")}"
+              entries << { name: name, path: path, source: source }
+            end
+          end
+        end
+
+        duplicates = entries.group_by { |entry| entry[:name].downcase }
+        entries.sort_by { |entry| [entry[:name].downcase, entry[:source].downcase, entry[:source]] }.map do |entry|
+          name = entry[:name]
+          label = duplicates[name.downcase].length > 1 ? "#{name} (#{entry[:source]})" : name
+          { name: name, label: label, path: entry[:path] }
+        end
+      end
+
       def get_template_src(options)
         template_name = options[:template] || default_template_name
 
@@ -112,6 +138,50 @@ module FoobarTemplates
       def file_in_source?(target)
         src_in_source_path = "#{File.dirname(__FILE__)}/templates/#{target}"
         File.exist?(src_in_source_path)
+      end
+
+      private
+
+      # lstat every component, including ancestors of the configured root. Do not
+      # realpath first: that would hide the very symlinks we need to exclude.
+      def catalog_directory?(path)
+        current = File.expand_path(path)
+        loop do
+          stat = File.lstat(current)
+          return false unless stat.directory? && !stat.symlink?
+          parent = File.dirname(current)
+          return true if parent == current
+          current = parent
+        end
+      rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP
+        false
+      end
+
+      def catalog_children(path)
+        Dir.children(path).sort.filter_map do |name|
+          next if name.start_with?(".")
+          child = File.join(path, name)
+          child if catalog_directory?(child)
+        end
+      end
+
+      def catalog_leaves(path, visited, nested: false)
+        return [] unless catalog_directory?(path)
+        stat = File.lstat(path)
+        identity = [stat.dev, stat.ino]
+        return [] if visited[identity]
+        visited[identity] = true
+
+        manifest = File.join(path, "foobar.yml")
+        # Never read linked/special metadata, even though legacy lookup permits it.
+        if File.symlink?(manifest) || (File.exist?(manifest) && !File.file?(manifest))
+          return []
+        end
+        config = load_template_config(path)
+        return [] if nested && config.nil?
+        return [path] unless config && config[:monorepo] == true
+
+        catalog_children(path).flat_map { |child| catalog_leaves(child, visited, nested: true) }
       end
 
     end

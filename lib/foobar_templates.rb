@@ -1,3 +1,7 @@
+module FoobarTemplates
+  class CLIError < StandardError; end
+end
+
 require "foobar_templates/version"
 require "foobar_templates/strings"
 require 'foobar_templates/configurator'
@@ -11,8 +15,6 @@ require 'uri'
 SOURCE_ROOT = File.expand_path("#{File.dirname(__FILE__)}/..")
 
 module FoobarTemplates
-  class CLIError < StandardError; end
-
   class << self
 
     def version
@@ -77,6 +79,10 @@ module FoobarTemplates
 
     def dir_to_template(input: $stdin, output: $stdout)
       CLI::DirToTemplate.go(input: input, output: output)
+    end
+
+    def merge(argv = [], input: $stdin, output: $stdout, error: $stderr)
+      CLI::Merge.run(argv, input: input, output: output, error: error)
     end
 
     def generate_template(options, gem_name)
