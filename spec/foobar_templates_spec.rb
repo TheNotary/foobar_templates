@@ -50,6 +50,38 @@ describe FoobarTemplates do
     expect(list_output).to include category
   end
 
+  it 'hides partial categories from listing but keeps them available for merging and explicit lookup' do
+    create_user_defined_template('services', 'template-starter')
+    paths = %w[partial PARTIAL Partial].each_with_index.map do |category, index|
+      create_user_defined_template(category, "template-addon-#{index}")
+    end
+
+    expect(FoobarTemplates.list).to eq " SERVICES:\n   starter\n\n"
+    catalog_paths = FoobarTemplates::TemplateManager.available_templates.map { |entry| entry[:path] }
+    paths.each_with_index do |path, index|
+      expect(catalog_paths).to include(path)
+      expect(FoobarTemplates::TemplateManager.get_template_src(template: "addon-#{index}")).to eq(path)
+    end
+  end
+
+  it 'hides partial leaves in nested monorepos without hiding other leaves' do
+    create_monorepo_template(['template-org'], monorepo: true)
+    create_monorepo_template(['template-org', 'template-team'], monorepo: true)
+    partial = create_monorepo_template(['template-org', 'template-team', 'template-addon'], monorepo: false, category: 'partial')
+    create_monorepo_template(['template-org', 'template-team', 'template-starter'], monorepo: false, category: 'services')
+
+    expect(FoobarTemplates.list).to eq " SERVICES:\n   starter\n\n"
+    expect(FoobarTemplates::TemplateManager.available_templates.map { |entry| entry[:path] }).to include(partial)
+    expect(FoobarTemplates::TemplateManager.get_template_src(template: 'addon')).to eq(partial)
+  end
+
+  it 'explains when only partial templates are installed, even if one is the default' do
+    create_user_defined_template('partial', 'template-addon')
+    FoobarTemplates::Configurator.new.default_template = 'addon'
+
+    expect(FoobarTemplates.list).to eq 'You have no starting-point templates. Partial templates are available with foobar_templates merge.'
+  end
+
   it "lists omit the prefix 'template-' if present in repo" do
     category = "ANYTHING"
     full_template_name = "template-happy-burger"

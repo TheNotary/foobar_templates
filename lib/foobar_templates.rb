@@ -25,15 +25,21 @@ module FoobarTemplates
       CLI::CheatSheet.go
     end
 
-    # lists available templates
+    # Lists starting-point templates; partials remain available for merging.
     def list
       configurator = Configurator.new
       available_templates = configurator.collect_user_defined_templates
+      starting_templates = available_templates.reject do |entry|
+        entry.keys.first.to_s.strip.casecmp?('partial')
+      end
 
-      available_templates = group_hashes_by_key(available_templates)
-      output = convert_grouped_hashes_to_output(available_templates)
+      grouped_templates = group_hashes_by_key(starting_templates)
+      output = convert_grouped_hashes_to_output(grouped_templates)
 
       if output.empty?
+        unless available_templates.empty?
+          return "You have no starting-point templates. Partial templates are available with foobar_templates merge."
+        end
         empty_output_msg = "You have no templates.  You can install the public example templates with\n"
         empty_output_msg += "the below command:\n\n"
         empty_output_msg += "foobar_templates --install-public-templates"
