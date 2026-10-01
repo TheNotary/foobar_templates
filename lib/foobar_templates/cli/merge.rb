@@ -92,7 +92,9 @@ module FoobarTemplates
             opts.on('-h', '--help', 'Show merge help without loading configuration') { options[:help] = true }
             opts.separator ''
             opts.separator 'Target: current directory; its basename supplies the rendered project name.'
-            opts.separator 'Without -t: choose templates with arrows, Space to mark, Enter to confirm; q/Esc cancels.'
+            opts.separator 'Without -t: categories flow down adaptive columns, with PARTIAL first; no horizontal scrolling.'
+            opts.separator 'Up/Down (k/j) follow entries; Left/Right (h/l) move between columns.'
+            opts.separator 'Space marks, Enter confirms; q/Esc cancels.'
             opts.separator 'Templates merge in displayed order; files in lexical order. No default template is used.'
             opts.separator 'Only picker flows may prompt for missing configuration; -t requires configured values.'
             opts.separator 'Differing files require y/n approval; d shows a unified diff. Input AND output must be TTYs.'

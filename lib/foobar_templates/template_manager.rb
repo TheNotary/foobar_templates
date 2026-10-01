@@ -27,16 +27,18 @@ module FoobarTemplates
             catalog_leaves(child, visited).each do |path|
               name = File.basename(path).sub(/^template-/, "")
               source = "#{origin}/#{path.delete_prefix("#{root}/")}"
-              entries << { name: name, path: path, source: source }
+              category = (load_template_config(path) || {})[:category].to_s.strip.downcase
+              category = 'misc' if category.empty?
+              entries << { name: name, path: path, source: source, category: category }
             end
           end
         end
 
         duplicates = entries.group_by { |entry| entry[:name].downcase }
-        entries.sort_by { |entry| [entry[:name].downcase, entry[:source].downcase, entry[:source]] }.map do |entry|
+        entries.sort_by { |entry| [entry[:category], entry[:name].downcase, entry[:source].downcase, entry[:source]] }.map do |entry|
           name = entry[:name]
           label = duplicates[name.downcase].length > 1 ? "#{name} (#{entry[:source]})" : name
-          { name: name, label: label, path: entry[:path] }
+          { name: name, label: label, path: entry[:path], category: entry[:category] }
         end
       end
 

@@ -52,11 +52,9 @@ You can merge template assets into an existing project with the `merge` subcomma
 
 | Command | Action |
 | ---     | ---    |
-| `foobar_templates merge`                     | supply no options to cruise through the TUI mode |
-| `foobar_templates merge -t api`              | Merge all files from a named template without the picker |
-| `foobar_templates merge -t api -a`           | Explicit all-files scope; **not** force overwrite |
-| `foobar_templates merge -t api -s file/path` | Merge exactly one source file, selected before name substitution |
-| `foobar_templates merge --help`              | Show merge options without initializing configuration |
+| `foobar_templates merge`        | supply no options to cruise through the TUI mode |
+| `foobar_templates merge --help` | Show merge options for non-interactive usage |
+
 
 ### Configuration
 

@@ -138,19 +138,24 @@ RSpec.describe 'merge end-to-end verification' do
   end
 
   it 'uses real fullscreen Space/arrows/Enter to merge two templates in display order, not marking order' do
-    add_template('aaa-e2e', 'alpha/foo-bar.txt' => "alpha foo-bar\n", 'shared' => "first foo-bar\n")
-    add_template('aab-e2e', 'beta.txt' => "beta FooBar\n", 'shared' => "second foo-bar\n")
+    add_template('aaa-e2e', { 'alpha/foo-bar.txt' => "alpha foo-bar\n", 'shared' => "first foo-bar\n" }, 'category' => 'backend')
+    add_template('aab-e2e', { 'beta.txt' => "beta FooBar\n", 'shared' => "second foo-bar\n" }, 'category' => 'frontend')
+    add_template('addon', { 'unused' => 'not selected' }, 'category' => 'partial')
     before = tree_snapshot(@templates)
     transcript, result = run_terminal(steps: [
-      ['Enter confirm', "\e[C"],
+      ['Enter confirm', "\e[B\e[B"],
       ['Focus: aab-e2e', ' '],
-      ['1 selected', "\e[D"],
+      ['1 selected', "\e[A"],
       ['Focus: aaa-e2e', ' '],
       ['2 selected', "\r"],
       ['Overwrite shared?', "d\n"],
       ['Overwrite shared?', "y\n"],
     ])
     expect(result.exitstatus).to eq(0), transcript
+    expect(transcript).to include('BACKEND', 'FRONTEND', 'MISC', 'PARTIAL')
+    expect(transcript.index('PARTIAL')).to be < transcript.index('BACKEND')
+    expect(transcript).to include('Focus: addon')
+    expect(File.exist?(File.join(@target, 'unused'))).to be(false)
     expect(transcript).to include("\e[?1049h", "\e[?1049l", "\e[?25h")
     expect(transcript).to include('-first sample-app', '+second sample-app', 'Template: aab-e2e')
     expect(transcript).to include('3 created, 1 overwritten, 0 unchanged, 0 skipped')

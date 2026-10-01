@@ -37,9 +37,9 @@ RSpec.describe FoobarTemplates::TemplateManager, '.available_templates' do
     File.write(File.join(@custom, 'ordinary-file'), 'not a template')
 
     expect(described_class.available_templates).to eq([
-      { name: 'alpha', label: 'alpha', path: alpha },
-      { name: 'api', label: 'api', path: api },
-      { name: 'Zebra', label: 'Zebra', path: zebra }
+      { name: 'alpha', label: 'alpha', path: alpha, category: 'misc' },
+      { name: 'api', label: 'api', path: api, category: 'misc' },
+      { name: 'Zebra', label: 'Zebra', path: zebra, category: 'misc' }
     ])
   end
 
@@ -57,9 +57,9 @@ RSpec.describe FoobarTemplates::TemplateManager, '.available_templates' do
     leaf = template(monorepo, 'template-api')
 
     expect(described_class.available_templates).to eq([
-      { name: 'api', label: 'api (builtin/template-api)', path: builtin },
-      { name: 'api', label: 'api (custom/api)', path: custom },
-      { name: 'api', label: 'api (custom/z-platform/template-api)', path: leaf }
+      { name: 'api', label: 'api (builtin/template-api)', path: builtin, category: 'misc' },
+      { name: 'api', label: 'api (custom/api)', path: custom, category: 'misc' },
+      { name: 'api', label: 'api (custom/z-platform/template-api)', path: leaf, category: 'misc' }
     ])
     expect(described_class.available_templates).to eq(described_class.available_templates)
   end
@@ -130,6 +130,16 @@ RSpec.describe FoobarTemplates::TemplateManager, '.available_templates' do
   it 'deduplicates the same source directory when both roots coincide' do
     path = template(@builtin, 'one')
     allow(described_class).to receive(:custom_template_location).and_return(@builtin)
-    expect(described_class.available_templates).to eq([{ name: 'one', label: 'one', path: path }])
+    expect(described_class.available_templates).to eq([{ name: 'one', label: 'one', path: path, category: 'misc' }])
+  end
+
+  it 'carries normalized leaf categories and sorts by category before template name' do
+    template(@custom, 'aaa', 'category: services')
+    root = template(@custom, 'collection', "monorepo: true\ncategory: ignored")
+    template(root, 'zzz', 'category: PARTIAL')
+    template(@custom, 'default', 'category: " "')
+
+    expect(described_class.available_templates.map { |entry| [entry[:name], entry[:category]] })
+      .to eq([['default', 'misc'], ['zzz', 'partial'], ['aaa', 'services']])
   end
 end
