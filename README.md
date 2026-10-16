@@ -55,6 +55,10 @@ You can merge template assets into an existing project with the `merge` subcomma
 | `foobar_templates merge`        | supply no options to cruise through the TUI mode |
 | `foobar_templates merge --help` | Show merge options for non-interactive usage |
 
+In the TUI, press `Tab` to list the focused template's files as a tree, then `Enter` on a file to merge just that file immediately (`Tab`/`Esc`/`q` return to the template list). Folders are gold, `README.md` files green, and entries gitignored by the template gray (shown for context but never merged; with `NO_COLOR` they are labeled `(gitignored)`).
+
+When a file differs from your local copy, a colored diff is shown (set `NO_COLOR` to disable) before the `y`/`n` prompt. Choose `e` to open `$VISUAL`/`$EDITOR` (default `vi`) on a Git-style conflict buffer (`<<<<<<<`/`=======`/`>>>>>>>`); save it without markers to write your resolution.
+
 
 ### Configuration
 

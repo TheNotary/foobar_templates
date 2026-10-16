@@ -87,7 +87,9 @@ RSpec.describe FoobarTemplates::CLI::Merge do
       allow(output).to receive(:tty?).and_return(true)
       expect(FoobarTemplates::TemplateManager).to receive(:available_templates).and_return([entry, second])
       expect(FoobarTemplates::TemplateManager).not_to receive(:get_template_src)
-      expect(FoobarTemplates::CLI::TemplatePicker).to receive(:new).with([entry, second], input: input, output: output).and_return(picker)
+      expect(FoobarTemplates::CLI::TemplatePicker).to receive(:new).with(
+        [entry, second], hash_including(input: input, output: output, file_lister: kind_of(Proc), file_merger: kind_of(Proc))
+      ).and_return(picker)
       expect(picker).to receive(:choose).and_return([entry, second])
       expect(engine_class).to receive(:new).with(hash_including(templates: [entry, second], interactive_config: true)).and_return(engine)
       expect(engine).to receive(:run).with(interactive: true).and_return(counts)
@@ -159,11 +161,92 @@ RSpec.describe FoobarTemplates::CLI::Merge do
       expect(described_class).to receive(:run).with(['--help'], input: input, output: output, error: error).and_return(0)
       expect(FoobarTemplates.merge(['--help'], input: input, output: output, error: error)).to eq(0)
     end
+
+    describe 'picker file tree' do
+      let(:picker) { instance_double(FoobarTemplates::CLI::TemplatePicker) }
+
+      before do
+        allow(input).to receive(:tty?).and_return(true)
+        allow(output).to receive(:tty?).and_return(true)
+        allow(FoobarTemplates::TemplateManager).to receive(:available_templates).and_return([entry])
+        allow(FoobarTemplates::CLI::TemplatePicker).to receive(:new) do |_entries, **options|
+          @tree_options = options
+          picker
+        end
+      end
+
+      def leave_picker_after
+        allow(picker).to receive(:choose) do
+          yield @tree_options
+          raise FoobarTemplates::CLI::TemplatePicker::Cancelled, 'Template selection cancelled.'
+        end
+      end
+
+      it 'merges one source file immediately and exits cleanly when the picker is left' do
+        input.write("\n"); input.rewind
+        expect(engine_class).to receive(:new).with(hash_including(
+          templates: [entry], selected_file: 'src/foo-bar.rb', interactive_config: true
+        )).and_return(engine)
+        expect(engine).to receive(:run).with(interactive: true)
+          .and_return(created: 1, overwritten: 0, unchanged: 0, skipped: 0)
+        leave_picker_after do |options|
+          expect(options[:file_merger].call(entry, 'src/foo-bar.rb')).to eq(:created)
+        end
+        expect(run_command).to eq(0)
+        expect(output.string).to include('Merging src/foo-bar.rb from api (custom/api)', 'src/foo-bar.rb: created',
+                                         'Press Enter to return', '1 created, 0 overwritten, 0 unchanged, 0 skipped')
+      end
+
+      it 'reports a failed file as an error and still treats leaving without merges as cancellation' do
+        input.write("\n"); input.rewind
+        allow(engine).to receive(:run).and_raise(FoobarTemplates::CLIError, "boom\e[2J")
+        leave_picker_after do |options|
+          expect(options[:file_merger].call(entry, 'file')).to eq(:error)
+        end
+        expect(run_command).to eq(1)
+        expect(output.string).to include('boom\\u001B[2J', 'Press Enter to return')
+        expect(output.string).not_to include('Merge complete')
+        expect(error.string).to include('cancelled')
+      end
+
+      it 'lists strict template source files and rejects monorepo containers' do
+        Dir.mktmpdir do |root|
+          FileUtils.mkdir_p(File.join(root, 'src'))
+          File.write(File.join(root, 'src/a.rb'), 'a')
+          File.write(File.join(root, 'foobar.yml'), 'category: misc')
+          leave_picker_after do |options|
+            expect(options[:file_lister].call(entry.merge(path: root))).to eq(['src/a.rb'])
+            allow(FoobarTemplates::TemplateManager).to receive(:monorepo_directory?).and_return(true)
+            expect { options[:file_lister].call(entry.merge(path: root)) }
+              .to raise_error(FoobarTemplates::CLIError, /monorepo container/)
+          end
+          expect(run_command).to eq(1)
+        end
+      end
+
+      it 'lists gitignored template entries as non-mergeable hashes' do
+        Dir.mktmpdir do |root|
+          system('git', '-C', root, 'init', '-q', exception: true)
+          FileUtils.mkdir_p(File.join(root, 'vendor/pkg'))
+          File.write(File.join(root, 'vendor/pkg/x'), 'x')
+          File.write(File.join(root, '.gitignore'), "vendor/\nsecret.env\n")
+          File.write(File.join(root, 'secret.env'), 's')
+          leave_picker_after do |options|
+            expect(options[:file_lister].call(entry.merge(path: root))).to contain_exactly(
+              '.gitignore',
+              { path: 'secret.env', ignored: true, directory: false },
+              { path: 'vendor', ignored: true, directory: true }
+            )
+          end
+          expect(run_command).to eq(1)
+        end
+      end
+    end
   end
 
   describe 'overwrite decisions and diffs' do
     let(:candidate) { Struct.new(:relative_path, :template, :bytes).new('my-app.rb', entry, "new my-app\n") }
-    let(:prompt) { described_class.new(input: input, output: output) }
+    let(:prompt) { described_class.new(input: input, output: output, color: false) }
 
     before do
       allow(input).to receive(:tty?).and_return(true)
@@ -176,9 +259,11 @@ RSpec.describe FoobarTemplates::CLI::Merge do
       prompt.confirm(candidate, "old local\n")
     end
 
-    it 'asks the exact question and accepts uppercase y' do
+    it 'shows the diff before asking the exact question and accepts uppercase y' do
       expect(answer_with("Y\n")).to be(true)
-      expect(output.string).to eq("Overwrite my-app.rb? [y/n; choose d to show diff]\n")
+      expect(output.string).to start_with("--- local/my-app.rb\n+++ rendered/api (custom/api)/my-app.rb\n@@")
+      expect(output.string).to end_with("Overwrite my-app.rb? [y/n; choose d to show diff or e to edit]\n")
+      expect(output.string.scan('--- local/').length).to eq(1)
     end
 
     it 're-prompts for blank/invalid answers and accepts uppercase n' do
@@ -195,7 +280,7 @@ RSpec.describe FoobarTemplates::CLI::Merge do
     it 'merges overlapping diff hunks and retains separate distant hunks' do
       local = (1..25).map { |i| "line #{i}\n" }.join
       candidate.bytes = local.sub('line 2', 'changed 2').sub('line 4', 'changed 4').sub('line 23', 'changed 23')
-      input.write("d\ny\n"); input.rewind
+      input.write("y\n"); input.rewind
       expect(prompt.confirm(candidate, local)).to be(true)
       expect(output.string.scan(/^@@ /).length).to eq(2)
       expect(output.string).to include('+changed 2', '+changed 4', '+changed 23')
@@ -221,7 +306,7 @@ RSpec.describe FoobarTemplates::CLI::Merge do
       candidate.relative_path = "evil\e[2J\n.rb"
       candidate.template = entry.merge(label: "api\r\u202E")
       candidate.bytes = "café\e[2J\x07\u009B\u202E\n"
-      prompt = described_class.new(input: input, output: output, multiple_templates: true)
+      prompt = described_class.new(input: input, output: output, multiple_templates: true, color: false)
       input.write("d\nn\n"); input.rewind
       expect(prompt.confirm(candidate, "local\r\n")).to be(false)
       expect(output.string).to include('Template: api\\u000D\\u202E', 'evil\\u001B[2J\\u000A.rb', 'café\\u001B[2J\\u0007\\u009B\\u202E', '-local\\u000D')
@@ -242,6 +327,102 @@ RSpec.describe FoobarTemplates::CLI::Merge do
     it 'propagates Interrupt to the command boundary' do
       allow(input).to receive(:gets).and_raise(Interrupt)
       expect { prompt.confirm(candidate, 'local') }.to raise_error(Interrupt)
+    end
+
+    describe 'colors' do
+      before do
+        allow(ENV).to receive(:[]).and_call_original
+        allow(ENV).to receive(:[]).with('TERM').and_return('xterm')
+      end
+
+      it 'colors only its own diff markup on a terminal' do
+        allow(ENV).to receive(:[]).with('NO_COLOR').and_return(nil)
+        candidate.bytes = "new \e[2J\n"
+        input.write("n\n"); input.rewind
+        described_class.new(input: input, output: output).confirm(candidate, "old local\n")
+        expect(output.string).to include("\e[1m--- local/my-app.rb\e[0m", "\e[36m@@ -1 +1 @@\e[0m",
+                                         "\e[31m-old local\e[0m", "\e[32m+new \\u001B[2J\e[0m")
+        expect(output.string).not_to include("\e[2J")
+      end
+
+      it 'honors NO_COLOR and non-terminal output' do
+        allow(ENV).to receive(:[]).with('NO_COLOR').and_return('1')
+        input.write("n\n"); input.rewind
+        described_class.new(input: input, output: output).confirm(candidate, "old local\n")
+        expect(output.string).to include('-old local')
+        expect(output.string).not_to include("\e")
+        allow(output).to receive(:tty?).and_return(false)
+        allow(ENV).to receive(:[]).with('NO_COLOR').and_return(nil)
+        expect(described_class.color?(output)).to be(false)
+      end
+    end
+
+    describe 'editing conflicts' do
+      let(:edits) { [] }
+
+      def editor_prompt(&edit)
+        described_class.new(input: input, output: output, color: false, editor: lambda do |path|
+          edits << [path, File.read(path), File.stat(path).mode & 0o777]
+          edit.call(path)
+        end)
+      end
+
+      it 'opens a private Git-style buffer and returns the saved resolution' do
+        input.write("e\n"); input.rewind
+        prompt = editor_prompt { |path| File.write(path, "resolved\n") }
+        expect(prompt.confirm(candidate, "old local\n")).to eq("resolved\n".b)
+        path, buffer, mode = edits.first
+        expect(path).to start_with('/')
+        expect(File.basename(path)).to eq('my-app.rb')
+        expect(mode).to eq(0o600)
+        expect(buffer).to eq("<<<<<<< local/my-app.rb\nold local\n=======\nnew my-app\n" \
+                             ">>>>>>> rendered/api (custom/api)/my-app.rb\n")
+        expect(File.exist?(path)).to be(false)
+        expect(output.string).to include('Saving resolved my-app.rb.')
+      end
+
+      it 'never saves remaining markers and resumes the edited buffer on the next e' do
+        input.write("e\ne\n"); input.rewind
+        prompt = editor_prompt do |path|
+          File.write(path, edits.length == 1 ? "#{File.read(path)}note\n" : "done\n")
+        end
+        expect(prompt.confirm(candidate, "old local\n")).to eq('done' + "\n")
+        expect(edits[1][1]).to start_with('<<<<<<< local/my-app.rb').and end_with("note\n")
+        expect(output.string).to include('Conflict markers remain in my-app.rb; nothing was saved.')
+      end
+
+      it 'saves nothing when the editor fails and keeps prompting' do
+        input.write("e\nn\n"); input.rewind
+        prompt = editor_prompt { |path| File.write(path, "partial\n") && false }
+        expect(prompt.confirm(candidate, "old local\n")).to be(false)
+        expect(output.string).to include('Editor did not exit successfully')
+      end
+
+      it 'refuses to edit binary content' do
+        candidate.bytes = "bin\0".b
+        input.write("e\nn\n"); input.rewind
+        prompt = editor_prompt { raise 'editor must not run' }
+        expect(prompt.confirm(candidate, "old\n")).to be(false)
+        expect(output.string).to include('cannot be edited')
+      end
+
+      it 'runs VISUAL before EDITOR as an argv without a shell, defaulting to vi' do
+        allow(ENV).to receive(:[]).and_call_original
+        allow(ENV).to receive(:[]).with('VISUAL').and_return("code --wait '--new window'")
+        allow(ENV).to receive(:[]).with('EDITOR').and_return('nano')
+        prompt = described_class.new(input: input, output: output, color: false)
+        expect(prompt).to receive(:system).with('code', '--wait', '--new window', '/tmp/x; rm -rf ~').and_return(true)
+        expect(prompt.send(:launch_editor, '/tmp/x; rm -rf ~')).to be(true)
+
+        allow(ENV).to receive(:[]).with('VISUAL').and_return(' ')
+        allow(ENV).to receive(:[]).with('EDITOR').and_return(nil)
+        expect(prompt).to receive(:system).with('vi', '/tmp/y').and_return(nil)
+        expect(prompt.send(:launch_editor, '/tmp/y')).to be(false)
+
+        allow(ENV).to receive(:[]).with('VISUAL').and_return("bad 'quote")
+        expect(prompt.send(:launch_editor, '/tmp/z')).to be(false)
+        expect(output.string).to include('Cannot parse editor command')
+      end
     end
   end
 end

@@ -26,6 +26,13 @@ module FoobarTemplates
         relative_paths.select { |rel| File.directory?(File.join(@root, rel)) }
       end
 
+      # Gitignored entries found during the walk. Ignored directories are
+      # reported once and never descended into.
+      def ignored_relative_paths
+        relative_paths
+        @ignored_relative_paths
+      end
+
       # Keep Git's NUL-delimited, per-level batching: filenames can contain
       # newlines and a template can contain more paths than fit in argv.
       def ignored_paths(rel_paths)
@@ -59,6 +66,7 @@ module FoobarTemplates
       def collect_non_ignored_paths
         validate_root! if @strict
         results = []
+        @ignored_relative_paths = []
         frontier = [nil]
 
         until frontier.empty?
@@ -73,7 +81,10 @@ module FoobarTemplates
           ignored = ignored_paths(level_children)
           frontier = []
           level_children.each do |rel|
-            next if ignored.include?(rel)
+            if ignored.include?(rel)
+              @ignored_relative_paths << rel
+              next
+            end
 
             path = File.join(@root, rel)
             if @strict

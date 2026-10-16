@@ -490,6 +490,41 @@ RSpec.describe FoobarTemplates::Core::Merger do
       expect(File.binread(destination)).to eq('prepared')
     end
 
+    it 'writes a resolved String instead of the incoming bytes, with the template mode' do
+      entry = template('base', 'file' => 'incoming')
+      File.chmod(0o750, File.join(entry[:path], 'file'))
+      destination = write_file(@target, 'file', 'local')
+      counts = merger(entry).run(interactive: true) { |_candidate, _local| "resolved caf\u00e9\n" }
+      expect(counts).to eq(created: 0, overwritten: 1, unchanged: 0, skipped: 0)
+      expect(File.binread(destination)).to eq("resolved caf\u00e9\n".b)
+      expect(File.stat(destination).mode & 0o777).to eq(0o750)
+      expect(Dir.children(@target)).to eq(['file'])
+    end
+
+    it 'counts a resolution identical to the local file as skipped without writing' do
+      entry = template('base', 'file' => 'incoming')
+      destination = write_file(@target, 'file', 'local')
+      File.utime(Time.at(1_000_000), Time.at(1_000_000), destination)
+      counts = merger(entry).run(interactive: true) { |_candidate, local| local.dup }
+      expect(counts).to eq(created: 0, overwritten: 0, unchanged: 0, skipped: 1)
+      expect(File.binread(destination)).to eq('local')
+      expect(File.stat(destination).mtime).to eq(Time.at(1_000_000))
+    end
+
+    it 're-prompts rather than writing a resolution if the destination changed while editing' do
+      entry = template('base', 'file' => 'incoming')
+      destination = write_file(@target, 'file', 'original')
+      observed = []
+      counts = merger(entry).run(interactive: true) do |_candidate, local|
+        observed << local
+        File.binwrite(destination, 'edited elsewhere') if observed.length == 1
+        "resolution #{observed.length}"
+      end
+      expect(observed).to eq(['original', 'edited elsewhere'])
+      expect(counts).to eq(created: 0, overwritten: 1, unchanged: 0, skipped: 0)
+      expect(File.binread(destination)).to eq('resolution 2')
+    end
+
     it 'cleans staging on callback failure while retaining completed writes and the unapproved destination' do
       entry = template('base', 'a-new' => 'new', 'z-conflict' => 'incoming')
       write_file(@target, 'z-conflict', 'local')

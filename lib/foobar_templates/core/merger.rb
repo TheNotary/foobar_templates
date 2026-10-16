@@ -190,6 +190,8 @@ module FoobarTemplates
         end
       end
 
+      # resolve_conflict returns true (write incoming), false (skip), or a
+      # String of user-resolved bytes to write instead of the incoming bytes.
       def apply(candidate, interactive, resolve_conflict)
         incoming = candidate.bytes
         loop do
@@ -198,24 +200,33 @@ module FoobarTemplates
             @counts[:unchanged] += 1
             return
           end
+          contents = incoming
           unless current.nil?
             unless interactive && resolve_conflict
               raise ConflictError, "File changed or conflicts require a terminal: #{candidate.relative_path.inspect}. Completed writes are retained."
             end
-            unless resolve_conflict.call(candidate, current)
+            decision = resolve_conflict.call(candidate, current)
+            unless decision
               @counts[:skipped] += 1
               return
             end
+            contents = decision.b if decision.is_a?(String)
           end
           # A user can edit a file while viewing its diff. Reconfirm new bytes
           # rather than applying approval to a different version of the file.
           next unless local_bytes(candidate) == current
 
+          if contents == current
+            # The resolution kept the local bytes; nothing needs writing.
+            @counts[:skipped] += 1
+            return
+          end
+
           destination = destination_path(candidate.relative_path)
           FileUtils.mkdir_p(File.dirname(destination))
           Tempfile.create(['.foobar-merge-', '.tmp'], File.dirname(destination)) do |temp|
             temp.binmode
-            temp.write(incoming)
+            temp.write(contents)
             temp.flush
             temp.chmod(candidate.mode)
             # Validate once more immediately before rename. This is per-file

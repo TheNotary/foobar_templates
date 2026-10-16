@@ -49,7 +49,9 @@ RSpec.describe FoobarTemplates::Core::TemplateSource do
       method.call(*args, **options)
     end
 
-    expect(described_class.new(@root, strict: true).files).to contain_exactly('.gitignore', "line\nbreak.txt", 'src/file')
+    source = described_class.new(@root, strict: true)
+    expect(source.files).to contain_exactly('.gitignore', "line\nbreak.txt", 'src/file')
+    expect(source.ignored_relative_paths).to contain_exactly('vendor', "line\nbreak.ignored", 'space name.ignored')
     expect(calls.length).to eq(2)
     expect(calls.first.first).to eq(['git', '-C', @root, 'check-ignore', '-z', '--stdin'])
     expect(calls.first.last[:stdin_data].split("\x00")).to include("line\nbreak.ignored", 'space name.ignored', 'vendor')

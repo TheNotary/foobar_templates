@@ -4,8 +4,11 @@ require 'unicode/display_width'
 module FoobarTemplates
   module CLI
     class TemplatePicker
+      class Cancelled < FoobarTemplates::CLIError; end
+
       # Adapter protocol: tty?, size ([rows, columns]), raw { ... }, write,
-      # flush, and read_key(timeout:) (a key symbol, nil for timeout, or :eof).
+      # flush, read_key(timeout:) (a key symbol, nil for timeout, or :eof), and
+      # suspend { ... } (leave fullscreen/raw mode for the block, then re-enter).
       class Terminal
         ARROWS = { 'A' => :up, 'B' => :down, 'C' => :right, 'D' => :left }.freeze
 
@@ -35,6 +38,15 @@ module FoobarTemplates
           @output.flush
         end
 
+        def suspend
+          write(LEAVE_SCREEN)
+          flush
+          @input.cooked { yield }
+        ensure
+          write(ENTER_SCREEN)
+          flush
+        end
+
         def read_key(timeout:)
           byte = read_byte(timeout)
           case byte
@@ -42,11 +54,13 @@ module FoobarTemplates
           when "\e" then escape_key
           when "\r", "\n" then :enter
           when ' ' then :space
+          when "\t" then :tab
           when 'h' then :left
           when 'j' then :down
           when 'k' then :up
           when 'l' then :right
-          when 'q', 'Q', "\x03" then :cancel
+          when 'q', 'Q' then :cancel
+          when "\x03" then :interrupt
           when "\x04" then :eof
           else :ignore
           end
@@ -84,8 +98,20 @@ module FoobarTemplates
 
       ENTER_SCREEN = "\e[?1049h\e[?25l".freeze
       LEAVE_SCREEN = "\e[0m\e[?25h\e[?1049l".freeze
+      GOLD = "\e[38;5;220m".freeze
+      GRAY = "\e[90m".freeze
+      GREEN = "\e[32m".freeze
+      RESET = "\e[0m".freeze
 
-      def initialize(entries, input: $stdin, output: $stdout, terminal: nil)
+      # file_lister.call(entry) returns template-relative file paths (Strings)
+      # or { path:, ignored:, directory: } hashes for gitignored entries, which
+      # are shown but never merged. file_merger.call(entry, path) merges one
+      # file, returning a status symbol. Both run outside raw mode; Tab is
+      # ignored unless both are given. color defaults to on unless NO_COLOR.
+      def initialize(entries, input: $stdin, output: $stdout, terminal: nil, file_lister: nil, file_merger: nil,
+                     color: nil)
+        @file_lister, @file_merger = file_lister, file_merger
+        @color = color.nil? ? ENV['NO_COLOR'].to_s.empty? : color
         @entries = entries.sort_by do |entry|
           group = category(entry)
           [group == 'partial' ? 0 : 1, group, sanitize(entry[:name]).downcase, sanitize(entry[:label]).downcase,
@@ -108,7 +134,7 @@ module FoobarTemplates
         end
 
         @focus, @top_row, @marked = 0, 0, {}
-        @layout_dimensions = nil
+        @layout_dimensions, @tree, @message = nil, nil, nil
         @terminal.raw do
           begin
             @terminal.write(ENTER_SCREEN)
@@ -122,9 +148,22 @@ module FoobarTemplates
                 dimensions = new_dimensions
                 redraw(dimensions)
               end
+              next if key.nil? || key == :ignore
+
+              @message = nil
+              raise Cancelled, 'Template selection cancelled.' if %i[interrupt eof].include?(key)
+
+              if @tree
+                # Merging suspends the screen; the terminal may be resized meanwhile.
+                dimensions = @terminal.size if tree_key(key)
+                redraw(dimensions)
+                next
+              end
               case key
-              when :cancel, :eof
-                raise FoobarTemplates::CLIError, 'Template selection cancelled.'
+              when :cancel
+                raise Cancelled, 'Template selection cancelled.'
+              when :tab
+                open_tree
               when :enter
                 return @marked.empty? ? [@entries[focus]] : @entries.each_index.select { |i| @marked[i] }.map { |i| @entries[i] }
               when :space
@@ -142,7 +181,7 @@ module FoobarTemplates
           end
         end
       rescue Interrupt
-        raise FoobarTemplates::CLIError, 'Template selection cancelled.'
+        raise Cancelled, 'Template selection cancelled.'
       rescue IOError, SystemCallError => error
         raise FoobarTemplates::CLIError, "Template selection terminal error: #{error.message}"
       end
@@ -294,6 +333,10 @@ module FoobarTemplates
       end
 
       def redraw(dimensions)
+        @tree ? redraw_tree(dimensions) : redraw_list(dimensions)
+      end
+
+      def redraw_list(dimensions)
         rows, terminal_columns = dimensions
         rows = [rows, 1].max
         # Leave the final terminal column unused to avoid automatic line wrapping.
@@ -320,12 +363,16 @@ module FoobarTemplates
           end.join('  ').rstrip
         end
         position = "Col #{column + 1}/#{@columns.length}"
-        help = '←/→ h/l columns | ↑/↓ k/j flow | Space toggle | Enter confirm | q/Esc/Ctrl-C cancel'
+        help = "←/→ h/l columns | ↑/↓ k/j flow | Space toggle | Enter confirm#{tree_enabled? ? ' | Tab files' : ''} | q/Esc/Ctrl-C cancel"
         footer = [
-          "#{position} | #{@marked.length} selected | rows #{@top_row + 1}-#{[@top_row + visible_rows, @total_rows].min}/#{@total_rows}",
+          @message || "#{position} | #{@marked.length} selected | rows #{@top_row + 1}-#{[@top_row + visible_rows, @total_rows].min}/#{@total_rows}",
           "Focus: #{@labels[focus]}",
           help
         ]
+        write_frame(lines, footer, footer_rows, available_width)
+      end
+
+      def write_frame(lines, footer, footer_rows, available_width)
         footer = footer.first(2) if footer_rows == 2
         footer = [footer[1]] if footer_rows == 1
         lines.concat(footer.map { |line| truncate(line, available_width) }) if footer_rows.positive?
@@ -333,6 +380,133 @@ module FoobarTemplates
         lines.each_with_index { |line, index| frame << "\e[#{index + 1};1H#{line}" }
         @terminal.write(frame)
         @terminal.flush
+      end
+
+      def tree_enabled?
+        @file_lister && @file_merger
+      end
+
+      def open_tree
+        return unless tree_enabled?
+
+        entry = @entries[focus]
+        rows = []
+        seen = {}
+        items = @file_lister.call(entry).map do |item|
+          if item.is_a?(Hash)
+            { path: item.fetch(:path).to_s, ignored: item[:ignored] ? true : false, directory: item[:directory] ? true : false }
+          else
+            { path: item.to_s, ignored: false, directory: false }
+          end
+        end
+        # Lexical order keeps every directory's descendants contiguous.
+        items.uniq { |item| item[:path] }.sort_by { |item| item[:path] }.each do |item|
+          parts = item[:path].split('/')
+          parts[0...-1].each_index do |depth|
+            directory = parts[0..depth].join('/')
+            next if seen[directory]
+
+            seen[directory] = true
+            rows << { depth: depth, name: "#{parts[depth]}/", directory: true }
+          end
+          if item[:directory]
+            next if seen[item[:path]]
+
+            seen[item[:path]] = true
+            rows << { depth: parts.length - 1, name: "#{parts.last}/", directory: true, ignored: item[:ignored] }
+          else
+            rows << { depth: parts.length - 1, name: parts.last, path: item[:path], ignored: item[:ignored] }
+          end
+        end
+        @tree = {
+          entry: entry, label: @labels[focus], rows: rows, focus: 0, top: 0, status: {},
+          files: rows.each_index.select { |index| rows[index][:path] && !rows[index][:ignored] },
+          ignored: rows.count { |row| row[:ignored] }
+        }
+      rescue FoobarTemplates::CLIError => error
+        @message = "Cannot list files: #{sanitize(error.message)}"
+      end
+
+      # Returns true when the screen was suspended for a merge.
+      def tree_key(key)
+        tree = @tree
+        case key
+        when :up, :down
+          step = key == :up ? -1 : 1
+          tree[:focus] = (tree[:focus] + step).clamp(0, [tree[:files].length - 1, 0].max)
+        when :tab, :cancel, :left
+          @tree = nil
+        when :enter
+          index = tree[:files][tree[:focus]]
+          return false unless index
+
+          path = tree[:rows][index][:path]
+          tree[:status][path] = @terminal.suspend { @file_merger.call(tree[:entry], path) }
+          return true
+        end
+        false
+      end
+
+      def redraw_tree(dimensions)
+        rows, terminal_columns = dimensions
+        rows = [rows, 1].max
+        available_width = [terminal_columns - 1, 0].max
+        title_rows = rows >= 3 ? 1 : 0
+        footer_rows = [[rows - title_rows - 2, 0].max, 3].min
+        visible_rows = rows - title_rows - footer_rows
+        tree = @tree
+        focus_row = tree[:files][tree[:focus]]
+        total_rows = [tree[:rows].length, 1].max
+        tree[:top] = [tree[:top], [total_rows - visible_rows, 0].max].min
+        if focus_row
+          tree[:top] = focus_row if focus_row < tree[:top]
+          tree[:top] = focus_row - visible_rows + 1 if focus_row >= tree[:top] + visible_rows
+        end
+
+        lines = []
+        lines << truncate("Files in #{tree[:label]} (template paths)", available_width) if title_rows.positive?
+        visible_rows.times do |offset|
+          index = tree[:top] + offset
+          row = tree[:rows][index]
+          if row.nil?
+            lines << truncate(tree[:rows].empty? && index.zero? ? '  (no eligible files)' : '', available_width)
+            next
+          end
+
+          head = "#{index == focus_row ? '>' : ' '} #{'  ' * row[:depth]}"
+          name = sanitize(row[:name])
+          status = tree[:status][row[:path]] if row[:path]
+          suffix = status ? " [#{sanitize(status)}]" : ''
+          suffix = ' (gitignored)' if row[:ignored] && !@color
+          lines << tree_line(head, name, suffix, tree_style(row), available_width)
+        end
+        focused = focus_row ? sanitize(tree[:rows][focus_row][:path]) : '(none)'
+        counts = "#{tree[:files].length} files#{tree[:ignored].positive? ? " | #{tree[:ignored]} gitignored" : ''}"
+        footer = [
+          "#{counts} | rows #{tree[:top] + 1}-#{[tree[:top] + visible_rows, total_rows].min}/#{total_rows}",
+          "Focus: #{focused}",
+          '↑/↓ k/j move | Enter merge file now | Tab/Esc/q back | Ctrl-C cancel'
+        ]
+        write_frame(lines, footer, footer_rows, available_width)
+      end
+
+      # Gitignored entries are gray even when they are folders or READMEs.
+      def tree_style(row)
+        return nil unless @color
+        return GRAY if row[:ignored]
+        return GOLD if row[:directory]
+
+        GREEN if row[:name].casecmp?('README.md')
+      end
+
+      # Truncate the plain text first so escape codes never affect widths, then
+      # color only the (possibly clipped) name.
+      def tree_line(head, name, suffix, style, available_width)
+        text = truncate("#{head}#{name}#{suffix}", available_width)
+        return text unless style && text.length > head.length && text.start_with?(head)
+
+        body = text[head.length..]
+        "#{head}#{style}#{body[0, name.length]}#{RESET}#{body[name.length..]}"
       end
     end
   end

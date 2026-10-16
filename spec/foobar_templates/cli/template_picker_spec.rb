@@ -32,6 +32,16 @@ RSpec.describe FoobarTemplates::CLI::TemplatePicker do
       @restored = true
     end
 
+    def suspended? = @suspended
+
+    def suspend
+      @suspended = true
+      @writes << :suspended
+      yield
+    ensure
+      @suspended = false
+    end
+
     def read_key(timeout:)
       event = @events.shift || :eof
       return event.call(self) if event.respond_to?(:call)
@@ -584,6 +594,139 @@ RSpec.describe FoobarTemplates::CLI::TemplatePicker do
     end
   end
 
+  describe 'file tree' do
+    def tree_picker(events, files:, merger: ->(_entry, _path) { :created }, dimensions: [12, 60], color: false)
+      @terminal = PickerTestTerminal.new(events, dimensions)
+      @calls = []
+      lister = files.respond_to?(:call) ? files : ->(_entry) { files }
+      @picker = described_class.new(entries(2), terminal: @terminal, file_lister: lister, color: color,
+                                    file_merger: lambda { |entry, path|
+                                      @calls << [entry[:name], path, @terminal.suspended?]
+                                      merger.call(entry, path)
+                                    })
+      @picker.choose
+    end
+
+    def tree_frames
+      @terminal.frames.select { |frame| frame.include?('Files in') }
+    end
+
+    it 'opens the focused template with Tab and merges the focused file on Enter while suspended' do
+      result = tree_picker([:down, :tab, :down, :enter, :tab, :enter],
+                           files: ['src/lib/a.rb', 'README.md', 'src/b.rb'], dimensions: [12, 100])
+      expect(result).to eq([entries(2)[1]])
+      expect(@calls).to eq([['item1', 'src/b.rb', true]])
+      lines = frame_lines(tree_frames.first)
+      expect(lines[0]).to eq('Files in item1 (template paths)')
+      expect(lines[1..5]).to eq(['> README.md', '  src/', '    b.rb', '    lib/', '      a.rb'])
+      expect(tree_frames.last).to include('>   b.rb [created]', 'Focus: src/b.rb', 'Enter merge file now')
+      suspended = @terminal.writes.index(:suspended)
+      expect(@terminal.writes[suspended + 1]).to include('[created]')
+      expect(@terminal.frames.last).to include('Select templates', 'Tab files')
+    end
+
+    %i[cancel left tab].each do |key|
+      it "returns from the tree to the list on #{key}" do
+        expect(tree_picker([:tab, key, :enter], files: ['a'])).to eq([entries(2)[0]])
+        expect(@calls).to be_empty
+      end
+    end
+
+    %i[interrupt eof].each do |key|
+      it "cancels the whole picker from the tree on #{key}" do
+        expect { tree_picker([:tab, key], files: ['a']) }
+          .to raise_error(described_class::Cancelled, 'Template selection cancelled.')
+        expect(@terminal.writes.last).to eq(described_class::LEAVE_SCREEN)
+      end
+    end
+
+    it 'shows an empty tree without calling the merger' do
+      tree_picker([:tab, :enter, :down, :cancel, :enter], files: [])
+      expect(tree_frames.first).to include('(no eligible files)', 'Focus: (none)')
+      expect(@calls).to be_empty
+    end
+
+    it 'shows lister errors in the list footer and stays in the list' do
+      lister = ->(_entry) { raise FoobarTemplates::CLIError, "nope\e[2J" }
+      expect(tree_picker([:tab, :enter], files: lister)).to eq([entries(2)[0]])
+      expect(@terminal.frames[1]).to include('Cannot list files: nope\\u001B[2J')
+      expect(@terminal.frames[1]).not_to include("\e[2Jnope")
+      expect(tree_frames).to be_empty
+    end
+
+    it 'records error statuses and sanitizes file names' do
+      tree_picker([:tab, :enter, :cancel, :enter], files: ["evil\e[2J"], merger: ->(_e, _p) { :error })
+      expect(tree_frames.last).to include('> evil\\u001B[2J [error]')
+    end
+
+    it 'scrolls to keep the focused file visible within bounded frames' do
+      files = Array.new(30) { |index| "f#{index.to_s.rjust(2, '0')}" }
+      tree_picker([:tab] + [:down] * 20 + [:cancel, :enter], files: files, dimensions: [8, 40])
+      expect(tree_frames.last).to include('> f20')
+      expect_bounded_frames([8, 40])
+    end
+
+    it 'ignores Tab when no file callbacks are configured' do
+      expect(choose([:tab, :down, :enter])).to eq([entries[1]])
+      expect(@terminal.frames.join).not_to include('Files in', 'Tab files')
+    end
+
+    describe 'colors' do
+      let(:gold) { described_class::GOLD }
+      let(:gray) { described_class::GRAY }
+      let(:green) { described_class::GREEN }
+      let(:reset) { described_class::RESET }
+      let(:files) do
+        ['README.md', 'src/a.rb', 'src/readme.MD', { path: 'secret.env', ignored: true },
+         { path: 'vendor', ignored: true, directory: true }, { path: 'docs/README.md', ignored: true }]
+      end
+
+      it 'colors folders gold, gitignored entries gray and README.md files green' do
+        tree_picker([:tab, :cancel, :enter], files: files, dimensions: [14, 100], color: true)
+        lines = frame_lines(tree_frames.first)
+        expect(lines[1..8]).to eq([
+          "> #{green}README.md#{reset}",
+          "  #{gold}docs/#{reset}",
+          "    #{gray}README.md#{reset}",
+          "  #{gray}secret.env#{reset}",
+          "  #{gold}src/#{reset}",
+          '    a.rb',
+          "    #{green}readme.MD#{reset}",
+          "  #{gray}vendor/#{reset}"
+        ])
+        expect(lines).to include('3 files | 3 gitignored | rows 1-8/8')
+      end
+
+      it 'never focuses or merges gitignored entries' do
+        tree_picker([:tab] + [:down] * 10 + [:enter, :cancel, :enter], files: files, dimensions: [14, 100])
+        expect(@calls.map { |call| call[1] }).to eq(['src/readme.MD'])
+        expect(tree_frames.join).not_to include('> secret.env', 'Focus: vendor', 'Focus: docs/README.md')
+      end
+
+      it 'colors only the name, after truncation, keeping status text plain' do
+        tree_picker([:tab, :enter, :cancel, :enter], files: ['README.md'], dimensions: [12, 100], color: true)
+        expect(tree_frames.last).to include("> #{green}README.md#{reset} [created]")
+        tree_picker([:tab, :cancel, :enter], files: ['src/README.md'], dimensions: [12, 10], color: true)
+        expect(frame_lines(tree_frames.first)).to include("  #{gold}src/#{reset}", ">   #{green}READ…#{reset}")
+      end
+
+      it 'labels gitignored entries in text and emits no colors when color is off' do
+        tree_picker([:tab, :cancel, :enter], files: files, dimensions: [14, 100])
+        expect(tree_frames.first).to include('  secret.env (gitignored)', '  vendor/ (gitignored)', '  src/')
+        expect(tree_frames.first).not_to include(gold, gray, green)
+      end
+
+      it 'defaults color off when NO_COLOR is set' do
+        allow(ENV).to receive(:[]).and_call_original
+        allow(ENV).to receive(:[]).with('NO_COLOR').and_return('1')
+        terminal = PickerTestTerminal.new([:tab, :cancel, :enter], [12, 60])
+        described_class.new(entries(2), terminal: terminal, file_lister: ->(_e) { ['README.md', 'd/x'] },
+                                        file_merger: ->(_e, _p) { :created }).choose
+        expect(terminal.frames.join).not_to include(gold, green)
+      end
+    end
+  end
+
   [:cancel, :eof].each do |key|
     it "raises CLIError and restores the terminal on #{key}" do
       expect { choose([key]) }.to raise_error(FoobarTemplates::CLIError, /cancelled/)
@@ -635,7 +778,7 @@ RSpec.describe FoobarTemplates::CLI::TemplatePicker do
       "\eOA" => :up, "\e[1;5C" => :right, "\e[3~" => :ignore,
       'h' => :left, 'j' => :down, 'k' => :up, 'l' => :right,
       ' ' => :space, "\r" => :enter, "\n" => :enter,
-      'q' => :cancel, 'Q' => :cancel, "\x03" => :cancel, "\x04" => :eof,
+      'q' => :cancel, 'Q' => :cancel, "\x03" => :interrupt, "\x04" => :eof, "\t" => :tab,
       'z' => :ignore, "\e" => :cancel
     }.each do |bytes, expected|
       it "decodes #{bytes.inspect} as #{expected}" do
@@ -646,6 +789,15 @@ RSpec.describe FoobarTemplates::CLI::TemplatePicker do
         reader&.close
         writer&.close
       end
+    end
+
+    it 'suspends by leaving fullscreen, yielding in cooked mode, then re-entering' do
+      input, output = double('input'), StringIO.new
+      expect(input).to receive(:cooked).and_yield
+      terminal = described_class.new(input, output)
+      expect(terminal.suspend { output.write('inside'); :done }).to eq(:done)
+      expect(output.string).to eq("#{FoobarTemplates::CLI::TemplatePicker::LEAVE_SCREEN}inside" \
+                                  "#{FoobarTemplates::CLI::TemplatePicker::ENTER_SCREEN}")
     end
 
     it 'distinguishes idle timeout from EOF' do

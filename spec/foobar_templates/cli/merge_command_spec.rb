@@ -3,6 +3,7 @@ require 'open3'
 require 'tmpdir'
 require 'rbconfig'
 require 'pty'
+require 'shellwords'
 require 'timeout'
 
 RSpec.describe 'foobar_templates merge executable' do
@@ -57,7 +58,7 @@ RSpec.describe 'foobar_templates merge executable' do
           begin
             loop do
               transcript << master.readpartial(4096)
-              questions = transcript.scan('[y/n; choose d to show diff]').length
+              questions = transcript.scan('[y/n; choose d to show diff or e to edit]').length
               while answered < questions
                 if interrupt
                   Process.kill('INT', pid)
@@ -140,6 +141,24 @@ RSpec.describe 'foobar_templates merge executable' do
         expect(transcript).to include(answer == 'y' ? '1 overwritten' : '1 skipped')
         expect(File.read(destination)).to eq(answer == 'y' ? "incoming my-app\n" : "local\n")
       end
+    end
+
+    it 'resolves a conflict in $EDITOR from a Git-style buffer in a real terminal' do
+      template({ 'foo-bar.rb' => "keep\nincoming foo-bar\n" })
+      destination = File.join(@target, 'my-app.rb')
+      File.write(destination, "keep\nlocal\n")
+      editor = File.join(@home, 'fake-editor')
+      seen = File.join(@home, 'seen-buffer')
+      File.write(editor, "#!/bin/sh\ncp \"$1\" #{seen.shellescape}\nprintf 'keep\\nmerged by hand\\n' > \"$1\"\n")
+      File.chmod(0o700, editor)
+      @env['VISUAL'] = nil
+      @env['EDITOR'] = editor
+      transcript, result = terminal_command('merge', '-t', 'merge-fixture', answers: ["e\n"])
+      expect(result.exitstatus).to eq(0), transcript
+      expect(File.read(seen)).to eq("keep\n<<<<<<< local/my-app.rb\nlocal\n=======\nincoming my-app\n" \
+                                    ">>>>>>> rendered/merge-fixture/my-app.rb\n")
+      expect(File.read(destination)).to eq("keep\nmerged by hand\n")
+      expect(transcript).to include('Saving resolved my-app.rb.', '1 overwritten')
     end
 
     it 'shows a binary notice in a real terminal without emitting bytes' do

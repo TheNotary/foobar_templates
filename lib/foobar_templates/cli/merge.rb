@@ -1,7 +1,10 @@
 require 'optparse'
+require 'shellwords'
+require 'tmpdir'
 require 'diff/lcs'
 require 'diff/lcs/hunk'
 require_relative 'template_picker'
+require_relative '../core/conflict_buffer'
 
 module FoobarTemplates
   module CLI
@@ -39,7 +42,23 @@ module FoobarTemplates
             [{ name: name, label: name, path: TemplateManager.get_template_src(template: name) }]
           else
             entries = TemplateManager.available_templates
-            TemplatePicker.new(entries, input: input, output: output).choose
+            tree_counts = { created: 0, overwritten: 0, unchanged: 0, skipped: 0 }
+            picker = TemplatePicker.new(
+              entries, input: input, output: output,
+              file_lister: ->(entry) { list_files(entry) },
+              file_merger: lambda do |entry, path|
+                merge_file(entry, path, configurator: configurator, input: input,
+                                        output: output, target: target, tally: tree_counts)
+              end
+            )
+            begin
+              picker.choose
+            rescue TemplatePicker::Cancelled
+              # Leaving after merging files from the tree is a normal exit.
+              raise if tree_counts.values.sum.zero?
+              report(output, tree_counts)
+              return tree_counts
+            end
           end
           raise CLIError, 'No templates selected. Merge cancelled.' if templates.nil? || templates.empty?
 
@@ -54,8 +73,7 @@ module FoobarTemplates
           counts = merger.run(interactive: interactive) do |candidate, local_bytes|
             prompt.confirm(candidate, local_bytes)
           end
-          output.puts "Merge complete: #{counts.fetch(:created)} created, #{counts.fetch(:overwritten)} overwritten, " \
-                      "#{counts.fetch(:unchanged)} unchanged, #{counts.fetch(:skipped)} skipped."
+          report(output, counts)
           counts
         end
 
@@ -73,6 +91,56 @@ module FoobarTemplates
         end
 
         private
+
+        def report(output, counts)
+          output.puts "Merge complete: #{counts.fetch(:created)} created, #{counts.fetch(:overwritten)} overwritten, " \
+                      "#{counts.fetch(:unchanged)} unchanged, #{counts.fetch(:skipped)} skipped."
+        end
+
+        def list_files(entry)
+          require_relative '../core/template_source'
+          if TemplateManager.monorepo_directory?(File.expand_path(entry.fetch(:path)))
+            raise CLIError, "Select a leaf template, not monorepo container #{entry.fetch(:name).inspect}."
+          end
+          source = Core::TemplateSource.new(entry.fetch(:path), strict: true)
+          ignored = source.ignored_relative_paths.map do |relative|
+            directory = begin
+              File.lstat(File.join(entry.fetch(:path), relative)).directory?
+            rescue SystemCallError
+              false
+            end
+            { path: relative, ignored: true, directory: directory }
+          end
+          source.files + ignored
+        end
+
+        # Runs outside the picker's raw mode: configuration prompts, the
+        # overwrite prompt and the editor all use the normal terminal.
+        def merge_file(entry, path, configurator:, input:, output:, target:, tally:)
+          require_relative '../core/merger' unless defined?(Core::Merger)
+          output.puts "Merging #{sanitize(path)} from #{sanitize(entry.fetch(:label))}"
+          merger = Core::Merger.new(
+            target: target, templates: [entry], selected_file: path, configurator: configurator,
+            interactive_config: true, input: input, output: output
+          )
+          prompt = new(input: input, output: output)
+          counts = merger.run(interactive: true) { |candidate, local_bytes| prompt.confirm(candidate, local_bytes) }
+          counts.each { |key, value| tally[key] += value }
+          status = %i[created overwritten unchanged skipped].find { |key| counts.fetch(key).positive? } || :unchanged
+          output.puts "#{sanitize(path)}: #{status}"
+          wait_for_return(input, output)
+          status
+        rescue CLIError => exception
+          output.puts sanitize(exception.message, multiline: true)
+          wait_for_return(input, output)
+          :error
+        end
+
+        def wait_for_return(input, output)
+          output.print 'Press Enter to return to the file tree.'
+          output.flush
+          input.gets
+        end
 
         def parse(argv)
           options = {}
@@ -95,9 +163,12 @@ module FoobarTemplates
             opts.separator 'Without -t: categories flow down adaptive columns, with PARTIAL first; no horizontal scrolling.'
             opts.separator 'Up/Down (k/j) follow entries; Left/Right (h/l) move between columns.'
             opts.separator 'Space marks, Enter confirms; q/Esc cancels.'
+            opts.separator 'Tab lists the focused template\'s files; Enter on a file merges it immediately; Tab/Esc/q go back.'
             opts.separator 'Templates merge in displayed order; files in lexical order. No default template is used.'
             opts.separator 'Only picker flows may prompt for missing configuration; -t requires configured values.'
-            opts.separator 'Differing files require y/n approval; d shows a unified diff. Input AND output must be TTYs.'
+            opts.separator 'Differing files show a colored diff (NO_COLOR disables) and require y/n approval; d re-shows it.'
+            opts.separator 'e opens $VISUAL/$EDITOR (default vi) with Git-style conflict markers; save without markers to'
+            opts.separator 'write the resolution. Input AND output must be TTYs.'
             opts.separator 'No Git init/add or bootstrap commands. Symlinks are rejected. No rollback of completed writes.'
             opts.separator 'Exit status: 0 complete (including skips), 1 error/cancel, 2 non-TTY conflict (no writes).'
           end
@@ -148,10 +219,23 @@ module FoobarTemplates
         end
       end
 
-      def initialize(input:, output:, multiple_templates: false)
-        @input, @output, @multiple_templates = input, output, multiple_templates
+      PROMPT_CHOICES = '[y/n; choose d to show diff or e to edit]'.freeze
+      DIFF_COLORS = { '-' => "\e[31m", '+' => "\e[32m", '@' => "\e[36m", '\\' => "\e[2m" }.freeze
+      HEADER_COLOR = "\e[1m".freeze
+      RESET = "\e[0m".freeze
+
+      def self.color?(output)
+        output.tty? && ENV['NO_COLOR'].to_s.empty? && ENV['TERM'] != 'dumb'
       end
 
+      # editor: callable receiving an absolute buffer path; truthy on success.
+      def initialize(input:, output:, multiple_templates: false, color: nil, editor: nil)
+        @input, @output, @multiple_templates = input, output, multiple_templates
+        @color = color.nil? ? self.class.color?(output) : color
+        @editor = editor || method(:launch_editor)
+      end
+
+      # Returns true (overwrite), false (skip), or the resolved bytes to write.
       def confirm(candidate, local_bytes)
         unless @input.tty? && @output.tty?
           raise Core::Merger::ConflictError, 'Overwrite approval requires an interactive input and output terminal.'
@@ -159,8 +243,11 @@ module FoobarTemplates
         if @multiple_templates
           @output.puts "Template: #{self.class.sanitize(candidate.template.fetch(:label))}"
         end
+        texts = diffable_texts(candidate, local_bytes)
+        show_diff(candidate, texts)
+        pending = nil
         loop do
-          @output.puts "Overwrite #{self.class.sanitize(candidate.relative_path)}? [y/n; choose d to show diff]"
+          @output.puts "Overwrite #{self.class.sanitize(candidate.relative_path)}? #{PROMPT_CHOICES}"
           @output.flush
           answer = @input.gets
           if answer.nil?
@@ -169,28 +256,35 @@ module FoobarTemplates
           case answer.strip.downcase
           when 'y' then return true
           when 'n' then return false
-          when 'd' then show_diff(candidate, local_bytes)
+          when 'd' then show_diff(candidate, texts)
+          when 'e'
+            resolved, pending = edit(candidate, texts, pending)
+            return resolved if resolved
           end
         end
       end
 
       private
 
-      def show_diff(candidate, local_bytes)
-        old_text = local_bytes.dup.force_encoding(Encoding::UTF_8)
-        new_text = candidate.bytes.dup.force_encoding(Encoding::UTF_8)
-        unless [old_text, new_text].all? { |text| text.valid_encoding? && !text.include?("\0") }
+      # [local, incoming] UTF-8 text, or nil when either side is binary/invalid.
+      def diffable_texts(candidate, local_bytes)
+        texts = [local_bytes, candidate.bytes].map { |bytes| bytes.dup.force_encoding(Encoding::UTF_8) }
+        texts.all? { |text| text.valid_encoding? && !text.include?("\0") } ? texts : nil
+      end
+
+      def show_diff(candidate, texts)
+        unless texts
           @output.puts 'Binary or invalid UTF-8 files differ; no text diff is available.'
           return
         end
 
         # Sanitize before diffing to preserve visible CR/control-only differences.
-        old_lines = self.class.sanitize(old_text, multiline: true).lines
-        new_lines = self.class.sanitize(new_text, multiline: true).lines
+        # Color codes are added afterwards, so only these escapes reach the terminal.
+        old_lines, new_lines = texts.map { |text| self.class.sanitize(text, multiline: true).lines }
         path = self.class.sanitize(candidate.relative_path)
         label = self.class.sanitize(candidate.template.fetch(:label))
-        @output.puts "--- local/#{path}"
-        @output.puts "+++ rendered/#{label}/#{path}"
+        @output.puts paint(HEADER_COLOR, "--- local/#{path}")
+        @output.puts paint(HEADER_COLOR, "+++ rendered/#{label}/#{path}")
         offset = 0
         hunks = []
         Diff::LCS.diff(old_lines, new_lines).each do |piece|
@@ -199,7 +293,60 @@ module FoobarTemplates
           hunk.merge(hunks.pop) if hunk.overlaps?(hunks.last)
           hunks << hunk
         end
-        hunks.each_with_index { |hunk, index| @output.puts hunk.diff(:unified, index == hunks.length - 1) }
+        hunks.each_with_index do |hunk, index|
+          text = hunk.diff(:unified, index == hunks.length - 1)
+          @output.puts text.split("\n", -1).map { |line| paint(DIFF_COLORS[line[0]], line) }.join("\n")
+        end
+      end
+
+      def paint(code, line)
+        @color && code && !line.empty? ? "#{code}#{line}#{RESET}" : line
+      end
+
+      # Returns [resolved_bytes_or_nil, buffer_to_resume_or_nil].
+      def edit(candidate, texts, pending)
+        unless texts
+          @output.puts 'Binary or invalid UTF-8 files cannot be edited; choose y or n.'
+          return [nil, pending]
+        end
+
+        path = self.class.sanitize(candidate.relative_path)
+        label = self.class.sanitize(candidate.template.fetch(:label))
+        buffer = pending || Core::ConflictBuffer.build(
+          *texts, local_label: "local/#{path}", incoming_label: "rendered/#{label}/#{path}"
+        )
+        Dir.mktmpdir('foobar-merge-edit-') do |directory|
+          # An absolute path can never be mistaken for an editor option.
+          file = File.join(directory, File.basename(candidate.relative_path))
+          File.open(file, File::WRONLY | File::CREAT | File::EXCL, 0o600) { |io| io.write(buffer) }
+          unless @editor.call(file)
+            @output.puts 'Editor did not exit successfully (check VISUAL or EDITOR); nothing was saved.'
+            return [nil, pending]
+          end
+          edited = File.binread(file).force_encoding(Encoding::UTF_8)
+          unless edited.valid_encoding?
+            @output.puts 'Edited buffer is not valid UTF-8; nothing was saved.'
+            return [nil, pending]
+          end
+          if Core::ConflictBuffer.unresolved?(edited)
+            @output.puts "Conflict markers remain in #{path}; nothing was saved. Choose e to continue editing."
+            return [nil, edited]
+          end
+          @output.puts "Saving resolved #{path}."
+          [edited.b, nil]
+        end
+      end
+
+      # Run the editor directly (no shell), so file names cannot inject commands.
+      def launch_editor(file)
+        command = [ENV['VISUAL'], ENV['EDITOR']].find { |value| !value.to_s.strip.empty? } || 'vi'
+        argv = Shellwords.split(command)
+        return false if argv.empty?
+
+        system(*argv, file) ? true : false
+      rescue ArgumentError => error
+        @output.puts "Cannot parse editor command: #{self.class.sanitize(error.message)}"
+        false
       end
     end
   end

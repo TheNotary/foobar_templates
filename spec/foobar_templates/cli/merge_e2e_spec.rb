@@ -194,6 +194,27 @@ RSpec.describe 'merge end-to-end verification' do
     expect(YAML.load_file(File.join(@home, '.foobar/config'))['k8s_domain']).to eq('cluster.example.test')
   end
 
+  it 'opens the file tree with Tab, merges one file with a colored diff, and exits cleanly from the picker' do
+    add_template('aaa-e2e', 'a-new.txt' => "new\n", 'foo-bar.txt' => "incoming foo-bar\n")
+    destination = File.join(@target, 'sample-app.txt')
+    File.write(destination, "local\n")
+    transcript, result = run_terminal(steps: [
+      ['Enter confirm', "\t"],
+      ['Enter merge file now', 'j'],
+      ['> foo-bar.txt', "\r"],
+      ['Overwrite sample-app.txt?', "y\n"],
+      ['Press Enter to return to the file tree.', "\n"],
+      ['foo-bar.txt [overwritten]', 'q'],
+      ['Enter confirm', 'q'],
+    ])
+    expect(result.exitstatus).to eq(0), transcript
+    expect(transcript).to include("\e[31m-local\e[0m", "\e[32m+incoming sample-app\e[0m")
+    expect(transcript).to include('foo-bar.txt: overwritten', '0 created, 1 overwritten, 0 unchanged, 0 skipped')
+    expect(File.read(destination)).to eq("incoming sample-app\n")
+    expect(Dir.children(@target)).to eq(['sample-app.txt'])
+    expect_no_lifecycle_side_effects
+  end
+
   { 'q' => 'q', 'Escape' => "\e", 'Ctrl-C' => "\x03" }.each do |name, key|
     it "cancels fullscreen with #{name}, restores terminal state and writes nothing" do
       add_template('aaa-e2e', 'alpha' => 'first')
